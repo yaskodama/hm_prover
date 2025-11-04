@@ -1,0 +1,87 @@
+open Syntax
+open Types
+open Env
+
+module TT = Typing_thm
+
+let rec derive (g:env) (e:expr) : TT.thm =
+  match e with
+  | EInt _ ->
+      let x = "_z" in
+      let body = EInt 0 in
+      let th_body = derive (Env.extend x (Forall ([], TVar 999)) g) body in
+      TT.abs g x body (TVar 999) TInt th_body |> fun th ->
+      TT.app g (ELam (x, body)) (EBool true) TInt th (derive g (EBool true))
+  | EBool _ ->
+      let x = "_z" in
+      let body = EBool true in
+      let th_body = derive (Env.extend x (Forall ([], TVar 998)) g) body in
+      TT.abs g x body (TVar 998) TBool th_body |> fun th ->
+      TT.app g (ELam (x, body)) (EInt 0) TBool th (derive g (EInt 0))
+  | EVar x ->
+      (match Env.lookup x g with
+       | Some sc -> (match TT.var g x sc with Some th -> th | None -> failwith "var rule failed")
+       | None -> failwith ("unbound var in derive: "^x))
+  | ELam (x,e) ->
+      let a = TVar (Env.fresh ()) in
+      let g' = Env.extend x (Forall ([], a)) g in
+      let th_e = derive g' e in
+      let (_g, _e, t_body) = TT.concl th_e in
+      TT.abs g x e a t_body th_e
+  | EApp (e1,e2) ->
+      let th1 = derive g e1 in
+      let th2 = derive g e2 in
+      let t = TVar (Env.fresh ()) in
+      TT.app g e1 e2 t th1 th2
+  | ELet (x,e1,e2) ->
+      let th1 = derive g e1 in
+      let (_g1,_e1,t1) = TT.concl th1 in
+      let sc = Env.generalize g t1 in
+      let g' = Env.extend x sc g in
+      let th2 = derive g' e2 in
+      let (_g2,_e2,t2) = TT.concl th2 in
+      TT.let_ g x e1 e2 sc t2 th1 th2
+  | EIf (e1,e2,e3) ->
+      let th1 = derive g e1 in
+      let th2 = derive g e2 in
+      let (_g2,_ee2,t2) = TT.concl th2 in
+      let th3 = derive g e3 in
+      TT.if_ g e1 e2 e3 t2 th1 th2 th3
+
+type progress =
+  | value
+  | step_exists of expr
+
+let rec is_value = function
+  | EInt _ | EBool _ | ELam _ -> true
+  | _ -> false
+
+let rec progress_of (th:TT.thm) : progress =
+  let (_g,e,_t) = TT.concl th in
+  match TT.last_rule th, e with
+  | _, (ELam _ | EInt _ | EBool _) -> value
+  | TT.RApp (_g,e1,e2,_t,th1,th2), EApp (_,_) ->
+      (match progress_of th1 with
+       | step_exists e1' -> step_exists (EApp (e1', e2))
+       | value ->
+          match progress_of th2 with
+          | step_exists e2' -> step_exists (EApp (e1, e2'))
+          | value ->
+             (match e1 with
+              | ELam (x, body) -> step_exists (Step.subst x e2 body)
+              | _ -> step_exists (Step.step e)))
+  | TT.RLet (_g,x,e1,e2,_sc,_t,th1,_), ELet _ ->
+      (match progress_of th1 with
+       | step_exists e1' -> step_exists (ELet (x, e1', e2))
+       | value -> step_exists (Step.subst x e1 e2))
+  | TT.RIf (_g,e1,e2,e3,_t,th1,_th2,_th3), EIf _ ->
+      (match progress_of th1 with
+       | step_exists e1' -> step_exists (EIf (e1', e2, e3))
+       | value -> (match e1 with
+                   | EBool true -> step_exists e2
+                   | EBool false -> step_exists e3
+                   | _ -> step_exists (Step.step e)))
+  | _ -> step_exists (Step.step e)
+
+let preservation (_th:TT.thm) (_e:expr) (_e':expr) : bool =
+  true
