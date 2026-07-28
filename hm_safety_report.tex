@@ -6,13 +6,12 @@
 \usepackage{amsmath,amssymb}
 \usepackage{amsthm}
 \usepackage{mathpartir}
-\usepackage{listings}
-\usepackage{xcolor}
-\geometry{margin=25mm}
 
 \newtheorem{theorem}{Theorem}
 \newtheorem{lemma}[theorem]{Lemma}
-\newtheorem{remark}[theorem]{Remark}
+\usepackage{listings}
+\usepackage{xcolor}
+\geometry{margin=25mm}
 
 \lstdefinelanguage{Coq}{
   morekeywords={
@@ -33,52 +32,61 @@
   columns=fullflexible
 }
 
+\newcommand{\ty}{\mathit{ty}}
 \newcommand{\tint}{\mathtt{int}}
-\newcommand{\inst}{\preceq}
-\newcommand{\gen}{\mathrm{gen}}
+\newcommand{\tbool}{\mathtt{bool}}
 \newcommand{\ftv}{\mathrm{ftv}}
+\newcommand{\dom}{\mathrm{dom}}
+\newcommand{\gen}{\mathrm{gen}}
+\newcommand{\genmax}{\mathrm{gen}_{\max}}
+\newcommand{\inst}{\preceq}
 \newcommand{\subst}[3]{#1[#2 := #3]}
 \newcommand{\step}{\longrightarrow}
 
-\title{Coq Proofs for Hindley--Milner Inference Soundness\\and Core Type Safety}
+\title{Coq Proofs for Hindley--Milner Inference Soundness and Type Safety}
 \author{}
 \date{}
 
 \begin{document}
 \maketitle
 
-\begin{abstract}
-This is an abridged English rendering of \texttt{hm\_safety\_report\_ja.tex},
-which is the primary version and carries the proofs step by step; the proof
-sketches below are shorter.  It describes the two Coq developments in this
-repository:
-\texttt{HMSoundness.v}, which relates an algorithmic Hindley--Milner inference
-judgement to a declarative one, and \texttt{HMTypeSafety.v}, which proves
-progress and preservation for a typed core language.  Both are set out here in
-the usual mathematical notation, with the grammars, the type definitions and
-the inference rules written out, so that the Coq text can be read against what
-it encodes, and with the shape of each proof described rather than merely
-cited.  Section~\ref{sec:reading} states plainly what the two theorems do and
-do not establish; that is the section to read before quoting any result from
-here.
-\end{abstract}
-
-\tableofcontents
-
 \section{Goal}
 
+This report describes two mechanized Coq developments about a small
+Hindley--Milner language, and states them in the usual mathematical notation so
+that the Coq text can be read against the rules it encodes.
+
 \begin{enumerate}
-  \item \emph{Inference soundness}: if the inference judgement assigns a type
-  to an expression, the declarative judgement assigns it too.  This is
-  \texttt{HMSoundness.v}.
-  \item \emph{Type safety}: a closed well-typed term is a value or can take a
-  step, and stepping preserves its type.  This is \texttt{HMTypeSafety.v}.
+  \item \emph{Inference soundness}: if the inference judgement assigns a type,
+  the declarative judgement assigns it too.  This is \texttt{HMSoundness.v}.
+  \item \emph{Type safety}: a closed well-typed term is a value or can step,
+  and stepping preserves its type.  This is \texttt{HMTypeSafety.v}.
 \end{enumerate}
 
-The two files are independent.  Each defines its own syntax, its own types and
-its own judgements, and neither imports the other.  In particular the type
-language of the second is not the type language of the first, a point taken up
-in Section~\ref{sec:reading}.
+Sections \ref{sec:sound-syntax}--\ref{sec:sound-proof} give the syntax, the
+rules and the proof of the first; sections
+\ref{sec:safe-syntax}--\ref{sec:safe-proof} do the same for the second.
+Section \ref{sec:limits} says what is not covered.
+
+\section{What this revision repaired}
+
+An earlier version of both files carried the Hindley--Milner name without the
+content.
+
+\paragraph{Instantiation and generalization were degenerate.}
+\texttt{HMSoundness.v} declared \texttt{inst (Forall xs T) T}, so instantiating
+a scheme returned its body unchanged, and \texttt{gen G T (Forall xs T)} with
+no side condition, so anything could be quantified.  With both rules the
+identity, the algorithmic and the declarative relations were the same rules
+constructor for constructor and soundness was a restatement.
+
+\paragraph{The safe language had no polymorphism.}
+\texttt{HMTypeSafety.v} declared \verb|ty := TInt | TArrow ty ty| --- no type
+variables at all --- with annotated lambdas and a monomorphic \texttt{let}.
+What was proved was the safety of the simply typed lambda calculus with
+\texttt{let} and addition.
+
+Both are repaired below.
 
 % =====================================================================
 \section{Inference soundness: syntax}
@@ -88,110 +96,90 @@ in Section~\ref{sec:reading}.
 
 \[
 \begin{array}{lcll}
-  e & ::= & x \mid n \mid \lambda x.\,e \mid e_1\,e_2
-            \mid \mathtt{let}\;x = e_1\;\mathtt{in}\;e_2
-    & \text{expressions}\\[2pt]
-  \tau & ::= & \tint \mid \alpha \mid \tau_1 \to \tau_2
-    & \text{types}\\[2pt]
-  \sigma & ::= & \tau \mid \forall \bar\alpha.\,\tau
-    & \text{type schemes}
+  e     & ::= & x \mid n \mid \lambda x.\,e \mid e_1\,e_2
+                \mid \mathtt{let}\;x = e_1\;\mathtt{in}\;e_2
+        & \text{expressions}\\[2pt]
+  \tau  & ::= & \tint \mid \alpha \mid \tau_1 \to \tau_2
+        & \text{types}\\[2pt]
+  \sigma & ::= & \forall \bar\alpha.\,\tau
+        & \text{type schemes}\\[2pt]
+  \Gamma & ::= & \cdot \mid \Gamma, x{:}\sigma
+        & \text{environments}
 \end{array}
 \]
 
-Variables $x$ and type variables $\alpha$ are natural numbers, and
-$\bar\alpha$ is a list of them.  In Coq:
+Here $x$ and $\alpha$ are natural numbers, and $\bar\alpha$ is a list of them.
+A monomorphic scheme is $\forall \varepsilon.\,\tau$, written $\tau$ when no
+confusion arises.  In Coq:
 
 \begin{lstlisting}
-Inductive ty : Type :=
-| TInt : ty
-| TVar : nat -> ty
-| TArrow : ty -> ty -> ty.
-
-Inductive expr : Type :=
-| EVar : nat -> expr   | EInt : nat -> expr
-| ELam : nat -> expr -> expr
-| EApp : expr -> expr -> expr
-| ELet : nat -> expr -> expr -> expr.
-
-Inductive scheme : Type :=
-| Mono : ty -> scheme
-| Forall : list nat -> ty -> scheme.
+Inductive ty := TInt | TVar : nat -> ty | TArrow : ty -> ty -> ty.
+Inductive expr := EVar : nat -> expr | EInt : nat -> expr
+                | ELam : nat -> expr -> expr
+                | EApp : expr -> expr -> expr
+                | ELet : nat -> expr -> expr -> expr.
+Inductive scheme := Sch : list nat -> ty -> scheme.
+Definition env := list (nat * scheme).
 \end{lstlisting}
 
-A scheme is either monomorphic or a $\forall$ wrapper; these are two separate
-constructors rather than the wrapper with an empty list.
+Environments are association lists rather than functions precisely so that
+$\ftv(\Gamma)$ below is computable.
 
-\subsection{Environments}
+\subsection{Free variables}
 
-An environment is a partial map from variables to schemes, represented as a
-function.
 \[
-  \Gamma : \mathbb{N} \to \sigma_\bot,
-  \qquad
-  \emptyset = \lambda y.\,\bot,
-  \qquad
-  (\Gamma, x{:}\sigma)(y) =
-    \begin{cases}
-      \sigma & y = x\\
-      \Gamma(y) & y \neq x
-    \end{cases}
+\begin{array}{lcl}
+  \ftv(\tint) &=& \emptyset \\
+  \ftv(\alpha) &=& \{\alpha\} \\
+  \ftv(\tau_1 \to \tau_2) &=& \ftv(\tau_1) \cup \ftv(\tau_2) \\[2pt]
+  \ftv(\forall\bar\alpha.\,\tau) &=& \ftv(\tau) \setminus \bar\alpha \\
+  \ftv(\Gamma) &=& \textstyle\bigcup_{x:\sigma \,\in\, \Gamma} \ftv(\sigma)
+\end{array}
 \]
 
-\begin{lstlisting}
-Definition env := nat -> option scheme.
-Definition empty : env := fun _ => None.
-Definition extend (G : env) (x : nat) (s : scheme) : env :=
-  fun y => if Nat.eqb x y then Some s else G y.
-\end{lstlisting}
-
-Because environments are functions rather than lists, $\ftv(\Gamma)$ is not
-computable here.  That is why the generalization rule below carries no side
-condition.
+In Coq these are \texttt{ftv}, \texttt{ftv\_scheme}, \texttt{ftv\_env}; the
+set difference is a \texttt{filter} over a boolean membership test
+\texttt{memb}, and \texttt{memb\_In} relates the two.
 
 \subsection{Instantiation and generalization}
 
+A substitution $s$ maps type variables to types and acts on types
+homomorphically; $s$ \emph{acts only on} $\bar\alpha$ when
+$s(\beta) = \beta$ for every $\beta \notin \bar\alpha$.
+
 \begin{mathpar}
-  \inferrule*[right=Inst-Mono]
-    { }
-    {\tau \;\inst\; \tau}
+  \inferrule*[right=Inst]
+    {s \text{ acts only on } \bar\alpha}
+    {\forall\bar\alpha.\,\tau \;\inst\; s(\tau)}
   \and
-  \inferrule*[right=Inst-Forall]
-    { }
-    {\forall\bar\alpha.\,\tau \;\inst\; \tau}
-  \and
-  \inferrule*[right=Gen-Mono]
-    { }
-    {\gen(\Gamma, \tau) \ni \tau}
-  \and
-  \inferrule*[right=Gen-Forall]
-    { }
+  \inferrule*[right=Gen]
+    {\bar\alpha \cap \ftv(\Gamma) = \emptyset}
     {\gen(\Gamma, \tau) \ni \forall\bar\alpha.\,\tau}
 \end{mathpar}
 
-These are the rules as the file states them, and they repay careful reading.
+\textsc{Inst} is the repair of the first defect: the scheme's body is really
+substituted into.  A consequence used repeatedly is that a monomorphic scheme
+has exactly one instance,
+\[
+  \forall\varepsilon.\,\tau \inst \tau'
+  \quad\Longrightarrow\quad
+  \tau' = \tau,
+\]
+which is \texttt{inst\_mono\_inv}, proved from \texttt{only\_on\_nil} (a
+substitution acting only on $\varepsilon$ is the identity) and
+\texttt{appT\_id}.
 
-\begin{remark}[Instantiation does not substitute]
-\label{rem:inst}
-\textsc{Inst-Forall} relates $\forall\bar\alpha.\,\tau$ to $\tau$ and to
-nothing else.  A scheme therefore has exactly one instance, its own body: the
-quantified variables are never replaced.  Instantiation is the identity on
-types.
-\end{remark}
+\textsc{Gen} is the repair of the second: the Damas--Milner side condition.
+It is not vacuous.  With $\Gamma = \{x_0 : \alpha_7\}$ the judgement
+$\gen(\Gamma, \alpha_7) \ni \forall\alpha_7.\,\alpha_7$ is \emph{underivable},
+which is \texttt{gen\_rejects\_env\_variable}; under the old definition it was
+derivable.
 
-\begin{remark}[Generalization has no side condition]
-\label{rem:gen}
-\textsc{Gen-Forall} holds for \emph{every} list $\bar\alpha$, with no
-requirement that those variables be absent from $\Gamma$.  The Damas--Milner
-condition $\bar\alpha \cap \ftv(\Gamma) = \emptyset$ is not present.  Nothing
-goes wrong as a consequence, but only because Remark~\ref{rem:inst} means the
-quantifier is never eliminated: a scheme built by \textsc{Gen-Forall} can only
-ever be used at its own body.
-\end{remark}
-
-The file's own header says as much: instantiation and generalization are
-``kept as relations \dots\ not on a particular implementation of free-variable
-sets and substitution''.  The consequences for the main theorem are drawn in
-Section~\ref{sec:reading}.
+The algorithm does not enjoy the freedom \textsc{Gen} allows.  It commits to
+the maximal generalization
+\[
+  \genmax(\Gamma,\tau) \;=\; \forall\,(\ftv(\tau) \setminus \ftv(\Gamma)).\,\tau .
+\]
 
 \section{Inference soundness: rules}
 
@@ -223,90 +211,81 @@ Section~\ref{sec:reading}.
 
 \subsection{Algorithmic system}
 
+The rules are the same except that \textsc{I-Let} has no choice of scheme:
+
 \begin{mathpar}
-  \inferrule*[right=I-Var]
-    {\Gamma(x) = \sigma \\ \sigma \inst \tau}
-    {\Gamma \vdash_{\!I} x : \tau}
-  \and
-  \inferrule*[right=I-Int]
-    { }
-    {\Gamma \vdash_{\!I} n : \tint}
-  \and
-  \inferrule*[right=I-Lam]
-    {\Gamma, x{:}\tau_1 \vdash_{\!I} e : \tau_2}
-    {\Gamma \vdash_{\!I} \lambda x.\,e : \tau_1 \to \tau_2}
-  \and
-  \inferrule*[right=I-App]
-    {\Gamma \vdash_{\!I} e_1 : \tau_1 \to \tau_2 \\
-     \Gamma \vdash_{\!I} e_2 : \tau_1}
-    {\Gamma \vdash_{\!I} e_1\,e_2 : \tau_2}
-  \and
   \inferrule*[right=I-Let]
     {\Gamma \vdash_{\!I} e_1 : \tau_1 \\
-     \gen(\Gamma,\tau_1) \ni \sigma \\
-     \Gamma, x{:}\sigma \vdash_{\!I} e_2 : \tau_2}
+     \Gamma, x{:}\genmax(\Gamma,\tau_1) \vdash_{\!I} e_2 : \tau_2}
     {\Gamma \vdash_{\!I} \mathtt{let}\;x = e_1\;\mathtt{in}\;e_2 : \tau_2}
 \end{mathpar}
 
-\textsc{I-App} models the situation after unification has succeeded: the
-function is already known to have an arrow type whose domain matches the
-argument.  \textsc{I-Lam} likewise guesses $\tau_1$ rather than solving for it.
-No unification algorithm appears in the development.
+Because \textsc{T-Let} carries a premise that \textsc{I-Let} does not, the two
+systems are no longer the same rules, and soundness has something to prove.
 
 \section{Inference soundness: the proof}
+\label{sec:sound-proof}
 
 \begin{theorem}[\texttt{hm\_infer\_sound}]
   If $\Gamma \vdash_{\!I} e : \tau$ then $\Gamma \vdash e : \tau$.
 \end{theorem}
 
 \begin{proof}[Shape of the proof]
-Induction on the derivation of $\Gamma \vdash_{\!I} e : \tau$, five cases, one
-per constructor.  Each case applies the declarative rule of the same name and
-discharges its premises with the ones already at hand.
+Induction on the derivation of $\Gamma \vdash_{\!I} e : \tau$, five cases.
 
-\begin{center}
-\begin{tabular}{lll}
-  case & rule applied & premises supplied by \\
-  \hline
-  \textsc{I-Var} & \textsc{T-Var} & the same two premises, carried over \\
-  \textsc{I-Int} & \textsc{T-Int} & none \\
-  \textsc{I-Lam} & \textsc{T-Lam} & the induction hypothesis \\
-  \textsc{I-App} & \textsc{T-App} & two induction hypotheses \\
-  \textsc{I-Let} & \textsc{T-Let} & two induction hypotheses and the
-                                    $\gen$ premise \\
-\end{tabular}
-\end{center}
+\textsc{I-Var} and \textsc{I-Int} are immediate: the corresponding declarative
+rules have the same premises, and the instantiation premise is carried over
+unchanged.  \textsc{I-Lam} and \textsc{I-App} follow from the induction
+hypotheses alone.
 
-The Coq proof is correspondingly five tactic lines.
-
-\begin{lstlisting}
-Proof.
-  intros G e T H. induction H.
-  - eapply TyVar; eauto.
-  - constructor.
-  - apply TyLam. exact IHhm_infer.
-  - eapply TyApp; eauto.
-  - eapply TyLet; eauto.
-Qed.
-\end{lstlisting}
+The one case with work is \textsc{I-Let}.  The induction hypotheses give
+$\Gamma \vdash e_1 : \tau_1$ and
+$\Gamma, x{:}\genmax(\Gamma,\tau_1) \vdash e_2 : \tau_2$.  To apply
+\textsc{T-Let} one must supply its middle premise,
+\[
+  \gen(\Gamma,\tau_1) \ni \genmax(\Gamma,\tau_1),
+\]
+that is: every variable the algorithm quantified is genuinely absent from
+$\ftv(\Gamma)$.  This is the lemma \texttt{gen\_max\_ok}.
 \end{proof}
 
-\subsection{Checked examples}
+\begin{lemma}[\texttt{gen\_max\_ok}]
+  $\gen(\Gamma,\tau) \ni \genmax(\Gamma,\tau)$ for all $\Gamma, \tau$.
+\end{lemma}
 
-Two programs are derived in the algorithmic system and transported by the
-theorem.
+\begin{proof}
+Unfolding, the quantified list is
+$\mathtt{filter}\,(\lambda a.\,\neg\,\mathtt{memb}\;a\;\ftv(\Gamma))\;\ftv(\tau)$.
+Let $a$ be in it.  By \texttt{filter\_In} the guard holds of $a$, so
+$\neg\,\mathtt{memb}\;a\;\ftv(\Gamma) = \mathtt{true}$; by
+\texttt{negb\_true\_iff}, $\mathtt{memb}\;a\;\ftv(\Gamma) = \mathtt{false}$; by
+\texttt{memb\_false\_notin}, $a \notin \ftv(\Gamma)$.  That is exactly the side
+condition of \textsc{Gen}.
+\end{proof}
+
+\subsection{Worked example: polymorphism is used}
+
+The scheme $\forall\alpha.\,\alpha \to \alpha$ has two instances used below,
+obtained from the substitutions $s_1 = [\alpha_0 := \tint]$ and
+$s_2 = [\alpha_0 := \tint \to \tint]$, each acting only on $\alpha_0$:
 \[
-  \mathtt{let}\;\mathit{id} = \lambda x.\,x\;\mathtt{in}\;\mathit{id}\;42
-  \;:\; \tint
+  \forall\alpha_0.\,\alpha_0 \to \alpha_0 \;\inst\; \tint \to \tint,
+  \qquad
+  \forall\alpha_0.\,\alpha_0 \to \alpha_0 \;\inst\;
+  (\tint \to \tint) \to (\tint \to \tint).
 \]
-The derivation generalizes the binding to
-$\forall[\alpha_0].\,(\tint \to \tint)$ and then uses it at
-$\tint \to \tint$ --- the body of the scheme, which by
-Remark~\ref{rem:inst} is its only instance.  The second example assumes
-$+ : \tint \to \tint \to \tint$ in the environment and derives
+With these, the program
 \[
-  \lambda x.\,(+\;x)\;1 \;:\; \tint \to \tint .
+  \mathtt{let}\;\mathit{id} = \lambda x.\,x\;\mathtt{in}\;
+  (\mathit{id}\;\mathit{id})\;42
 \]
+is derived at type $\tint$ in the algorithmic system and transported to the
+declarative one by the theorem.  The left occurrence of $\mathit{id}$ is used at
+$(\tint \to \tint) \to (\tint \to \tint)$ and the right one at
+$\tint \to \tint$.  The companion lemma
+\texttt{selfapp\_needs\_polymorphism} shows this is impossible with a
+monomorphic binding: by \texttt{inst\_mono\_inv} both occurrences would have to
+receive the same type, and those two types differ.
 
 % =====================================================================
 \section{Type safety: syntax}
@@ -316,47 +295,54 @@ $+ : \tint \to \tint \to \tint$ in the environment and derives
 
 \[
 \begin{array}{lcll}
-  t & ::= & x \mid n \mid t_1 + t_2 \mid \lambda x{:}\tau.\,t \mid t_1\,t_2
+  t & ::= & x \mid n \mid t_1 + t_2 \mid \lambda x.\,t \mid t_1\,t_2
             \mid \mathtt{let}\;x = t_1\;\mathtt{in}\;t_2
     & \text{terms}\\[2pt]
-  v & ::= & n \mid \lambda x{:}\tau.\,t
+  v & ::= & n \mid \lambda x.\,t
     & \text{values}\\[2pt]
-  \tau & ::= & \tint \mid \tau_1 \to \tau_2
-    & \text{types}
+  \tau & ::= & \tint \mid \alpha \mid \#i \mid \tau_1 \to \tau_2
+    & \text{types}\\[2pt]
+  \sigma & ::= & \forall^{n}.\,\tau
+    & \text{schemes}
 \end{array}
 \]
 
-\begin{lstlisting}
-Inductive ty : Type :=
-| TInt : ty
-| TArrow : ty -> ty -> ty.
+Lambdas carry no annotation: the language is untyped and the relation types it,
+as in a real HM system.
 
-Inductive tm : Type :=
-| TVar : nat -> tm       | TIntLit : nat -> tm
-| TAdd : tm -> tm -> tm
-| TLam : nat -> ty -> tm -> tm
-| TApp : tm -> tm -> tm
-| TLet : nat -> tm -> tm -> tm.
-\end{lstlisting}
+Types have \emph{two} kinds of variable.  $\alpha$ ranges over free type
+variables (\texttt{TFree}); $\#i$ is the $i$-th variable bound by the
+enclosing scheme (\texttt{TBound}), a de Bruijn index.  A scheme
+$\forall^{n}.\,\tau$ binds $\#0,\dots,\#(n-1)$ in $\tau$.
 
-Two differences from Section~\ref{sec:sound-syntax} are worth stating
-explicitly, because the two files are easily read as one development.
+This split is the device that keeps the development short.  Instantiation
+replaces only $\#i$, and what it substitutes in contains only $\alpha$'s, so a
+free variable can never be captured by a quantifier.  No freshness side
+conditions and no type substitution lemma are needed anywhere.
 
-\begin{remark}[The type language has no variables]
-\label{rem:notvars}
-$\tau ::= \tint \mid \tau_1 \to \tau_2$.  There is no \texttt{TVar}
-constructor, no scheme and no quantifier.  Environments map variables to
-\emph{types}, not to schemes.
-\end{remark}
+\subsection{Instantiation}
 
-\begin{remark}[Lambdas are annotated and \texttt{let} is monomorphic]
-\label{rem:mono}
-$\lambda x{:}\tau.\,t$ carries its argument type, and \textsc{S-Let} below
-binds $x$ at the single type given to $t_1$.  There is no generalization step.
-\end{remark}
+For $\bar\tau = \tau_0 \dots \tau_{n-1}$ define
+\[
+\begin{array}{lcl}
+  \mathtt{open}\,\bar\tau\,\tint &=& \tint \\
+  \mathtt{open}\,\bar\tau\,\alpha &=& \alpha \\
+  \mathtt{open}\,\bar\tau\,\#i &=& \tau_i \quad (\text{$\#i$ if } i \geq n) \\
+  \mathtt{open}\,\bar\tau\,(\tau_1 \to \tau_2) &=&
+    \mathtt{open}\,\bar\tau\,\tau_1 \to \mathtt{open}\,\bar\tau\,\tau_2
+\end{array}
+\]
 
-Together these say that the language of this file is the simply typed lambda
-calculus with \texttt{let} and addition.
+\begin{mathpar}
+  \inferrule*[right=Inst]
+    {|\bar\tau| = n}
+    {\forall^{n}.\,\tau \;\inst\; \mathtt{open}\,\bar\tau\,\tau}
+\end{mathpar}
+
+Since $\mathtt{open}\,\varepsilon\,\tau = \tau$ unconditionally
+(\texttt{open\_nil}), a monomorphic scheme $\forall^{0}.\,\tau$ again has
+exactly one instance, $\tau$ itself (\texttt{inst\_mono},
+\texttt{inst\_mono\_inv}).
 
 \section{Type safety: rules}
 
@@ -364,7 +350,7 @@ calculus with \texttt{let} and addition.
 
 \begin{mathpar}
   \inferrule*[right=S-Var]
-    {\Gamma(x) = \tau}
+    {\Gamma(x) = \sigma \\ \sigma \inst \tau}
     {\Gamma \vdash x : \tau}
   \and
   \inferrule*[right=S-Int]
@@ -376,37 +362,26 @@ calculus with \texttt{let} and addition.
     {\Gamma \vdash t_1 + t_2 : \tint}
   \and
   \inferrule*[right=S-Lam]
-    {\Gamma, x{:}\tau_1 \vdash t : \tau_2}
-    {\Gamma \vdash \lambda x{:}\tau_1.\,t : \tau_1 \to \tau_2}
+    {\Gamma, x{:}\forall^{0}.\,\tau_1 \vdash t : \tau_2}
+    {\Gamma \vdash \lambda x.\,t : \tau_1 \to \tau_2}
   \and
   \inferrule*[right=S-App]
     {\Gamma \vdash t_1 : \tau_1 \to \tau_2 \\ \Gamma \vdash t_2 : \tau_1}
     {\Gamma \vdash t_1\,t_2 : \tau_2}
   \and
   \inferrule*[right=S-Let]
-    {\Gamma \vdash t_1 : \tau_1 \\ \Gamma, x{:}\tau_1 \vdash t_2 : \tau_2}
-    {\Gamma \vdash \mathtt{let}\;x = t_1\;\mathtt{in}\;t_2 : \tau_2}
+    {\forall \bar\tau.\; |\bar\tau| = n \Rightarrow
+       \Gamma \vdash t_1 : \mathtt{open}\,\bar\tau\,\tau_0 \\\\
+     \Gamma, x{:}\forall^{n}.\,\tau_0 \vdash t_2 : \tau}
+    {\Gamma \vdash \mathtt{let}\;x = t_1\;\mathtt{in}\;t_2 : \tau}
 \end{mathpar}
 
-\subsection{Substitution}
-
-$\subst{t}{x}{s}$ replaces free occurrences of $x$ by $s$, stopping at a
-binder for $x$.
-
-\[
-\begin{array}{lcl}
-  \subst{y}{x}{s} &=& \text{$s$ if $y = x$, else $y$} \\
-  \subst{n}{x}{s} &=& n \\
-  \subst{(t_1 + t_2)}{x}{s} &=& \subst{t_1}{x}{s} + \subst{t_2}{x}{s} \\
-  \subst{(\lambda y{:}\tau.\,t)}{x}{s} &=&
-     \text{$\lambda y{:}\tau.\,t$ if $y = x$, else
-           $\lambda y{:}\tau.\,\subst{t}{x}{s}$} \\
-  \subst{(t_1\,t_2)}{x}{s} &=& \subst{t_1}{x}{s}\;\subst{t_2}{x}{s} \\
-  \subst{(\mathtt{let}\;y = t_1\;\mathtt{in}\;t_2)}{x}{s} &=&
-     \mathtt{let}\;y = \subst{t_1}{x}{s}\;\mathtt{in}\;
-     (\text{$t_2$ if $y = x$, else $\subst{t_2}{x}{s}$})
-\end{array}
-\]
+\textsc{S-Let} is generalization read semantically: rather than computing a
+scheme from $\ftv(\Gamma)$, it demands that $t_1$ be typeable at \emph{every}
+instance of the scheme, and lets each occurrence of $x$ in $t_2$ pick whichever
+instance it needs.  The premise is a universally quantified hypothesis, which
+Coq accepts as a strictly positive occurrence and for which it generates the
+expected induction hypothesis.
 
 \subsection{Operational semantics}
 
@@ -427,7 +402,7 @@ Call by value, left to right.
   \and
   \inferrule*[right=E-Beta]
     { }
-    {(\lambda x{:}\tau.\,t)\,v \step \subst{t}{x}{v}}
+    {(\lambda x.\,t)\,v \step \subst{t}{x}{v}}
   \and
   \inferrule*[right=E-App1]
     {t_1 \step t_1'}
@@ -447,66 +422,65 @@ Call by value, left to right.
      \mathtt{let}\;x = t_1'\;\mathtt{in}\;t_2}
 \end{mathpar}
 
+Substitution $\subst{t}{x}{v}$ is the usual capture-avoiding-by-shadowing
+definition: it stops at $\lambda x$ and at the body of
+$\mathtt{let}\;x = \cdot$.
+
 \section{Type safety: the proof}
+\label{sec:safe-proof}
 
 \subsection{Environment lemmas}
 
-Four facts about \texttt{extend}, each by case analysis on $\mathtt{Nat.eqb}$:
-
-\[
-\begin{array}{ll}
-  \texttt{extend\_eq} & (\Gamma, x{:}\tau)(x) = \tau \\
-  \texttt{extend\_neq} & x \neq y \Rightarrow (\Gamma, x{:}\tau)(y) = \Gamma(y) \\
-  \texttt{extend\_shadow} & \Gamma, x{:}\tau_1, x{:}\tau_2 = \Gamma, x{:}\tau_2 \\
-  \texttt{extend\_permute} & x \neq y \Rightarrow
-     \Gamma, x{:}\tau_x, y{:}\tau_y = \Gamma, y{:}\tau_y, x{:}\tau_x
-\end{array}
-\]
-
-On these sit \texttt{context\_invariance} (pointwise-equal environments type
-the same terms) and \texttt{weakening} (typing survives extending the
-environment), both by induction on the typing derivation, with
-\texttt{weaken\_empty} as the special case from $\emptyset$.
+Environments are functions $\mathbb{N} \to \sigma_\bot$, so the four facts
+needed about them are one-liners:
+\texttt{extend\_eq}, \texttt{extend\_neq},
+\texttt{extend\_shadow} $(\Gamma, x{:}\sigma_1, x{:}\sigma_2 = \Gamma, x{:}\sigma_2)$
+and \texttt{extend\_permute} $(x \neq y \Rightarrow \Gamma, x{:}\sigma_x, y{:}\sigma_y
+= \Gamma, y{:}\sigma_y, x{:}\sigma_x)$, all by case analysis on
+$\mathtt{Nat.eqb}$.  On top of them sit \texttt{context\_invariance}
+(pointwise-equal environments type the same terms) and \texttt{weakening},
+both by induction on the typing derivation.
 
 \subsection{Substitution}
 
 \begin{lemma}[\texttt{substitution\_preserves\_typing}]
-  If $\Gamma, x{:}\upsilon \vdash t : \tau$ and $\vdash v : \upsilon$ then
+  If $\Gamma, x{:}\sigma \vdash t : \tau$ and $\vdash v : \tau'$ for
+  \emph{every} $\tau'$ with $\sigma \inst \tau'$, then
   $\Gamma \vdash \subst{t}{x}{v} : \tau$.
 \end{lemma}
 
+The hypothesis on $v$ is what makes the lemma work for a polymorphic binding:
+$v$ must be typeable at each instance $x$ might be used at.
+
 \begin{proof}[Shape of the proof]
-Induction on the term $t$, inverting the typing derivation in each case.  Six
-cases; three carry the argument.
+Induction on the \emph{term} $t$ --- not on the derivation --- so that each
+case may re-use the hypothesis on $v$ at a different type.  Six cases; the
+three that carry the argument are:
 
-\emph{Variable.}  Split on whether the variable is $x$.  If it is,
-\texttt{extend\_eq} identifies its type as $\upsilon$ and
-\texttt{weaken\_empty} lifts $\vdash v : \upsilon$ to $\Gamma$.  If it is not,
-\texttt{extend\_neq} discards the binding and \textsc{S-Var} rebuilds the
-derivation.
+\emph{Variable.}  If $t = x$, the lookup yields $\sigma$ by
+\texttt{extend\_eq}, the typing premise gives $\sigma \inst \tau$, and the
+hypothesis on $v$ supplies $\vdash v : \tau$, which \texttt{weaken\_empty}
+lifts to $\Gamma$.  If $t = y \neq x$, \texttt{extend\_neq} discards the
+binding and \textsc{S-Var} rebuilds the derivation.
 
-\emph{Lambda.}  For $\lambda y{:}\tau_1.\,t'$ the substitution stops when
-$y = x$; that case is closed by \texttt{context\_invariance} together with
-\texttt{extend\_shadow}, since the inner binding of $x$ hides the outer one.
-When $y \neq x$ the two bindings are exchanged by \texttt{extend\_permute} and
-the induction hypothesis applies.
+\emph{Lambda.}  For $t = \lambda y.\,t'$ the substitution stops when $y = x$.
+That case is closed by \texttt{context\_invariance} with
+\texttt{extend\_shadow}: the inner binding of $x$ hides the outer one.  When
+$y \neq x$ the two bindings are swapped by \texttt{extend\_permute} and the
+induction hypothesis applies.
 
-\emph{Let.}  The same shadow/permute split for the body; the bound expression
-is handled by the induction hypothesis directly.
+\emph{Let.}  The same shadow/permute split for the body.  The bound expression
+is handled by instantiating the universally quantified premise of
+\textsc{S-Let} at each $\bar\tau$ and appealing to the induction hypothesis
+for $t_1$ at that instance.
 \end{proof}
 
 \subsection{Canonical forms}
 
-By inversion on $\mathrm{value}(v)$ and then on the typing derivation:
-\[
-  \mathrm{value}(v),\; \vdash v : \tint
-    \;\Longrightarrow\; v = n
-  \qquad
-  \mathrm{value}(v),\; \vdash v : \tau_1 \to \tau_2
-    \;\Longrightarrow\; v = \lambda x{:}\tau_1.\,t
-\]
-The remaining combinations are refuted because \textsc{S-Int} and
-\textsc{S-Lam} build different type constructors.
+By inversion on $\mathtt{value}\,v$ and then on the typing derivation: a value
+of type $\tint$ is an integer literal, and a value of type
+$\tau_1 \to \tau_2$ is a lambda.  The other combinations are refuted because
+\textsc{S-Int} and \textsc{S-Lam} produce different type constructors.
 
 \subsection{Progress}
 
@@ -515,18 +489,24 @@ The remaining combinations are refuted because \textsc{S-Int} and
 \end{theorem}
 
 \begin{proof}[Shape of the proof]
-Induction on the typing derivation with the environment remembered as
-$\emptyset$.
+Induction on the typing derivation, with the environment remembered as empty.
 
-\textsc{S-Var} is vacuous: $\emptyset$ yields no binding, so its premise is
-contradictory.  \textsc{S-Int} and \textsc{S-Lam} produce values.
+\textsc{S-Var} is vacuous: the empty environment yields no binding, so the
+premise is contradictory.  \textsc{S-Int} and \textsc{S-Lam} give values
+directly.
 
 \textsc{S-Add}: if both operands are values, canonical forms make them integer
-literals and \textsc{E-Add} fires; otherwise whichever operand steps is
-propagated by \textsc{E-Add1} or \textsc{E-Add2}.  \textsc{S-App} runs the same
-way, with the canonical form at arrow type turning the function into a lambda
-so that \textsc{E-Beta} applies.  \textsc{S-Let}: if $t_1$ is a value then
-\textsc{E-Let} fires, else \textsc{E-Let1} propagates.
+literals and \textsc{E-Add} fires; otherwise the first operand that steps is
+propagated by \textsc{E-Add1} or \textsc{E-Add2}.  \textsc{S-App} is the same
+argument, with \texttt{canonical\_arrow} turning the function into a lambda so
+that \textsc{E-Beta} applies.
+
+\textsc{S-Let}: the induction hypothesis for $t_1$ is itself universally
+quantified over $\bar\tau$, so it must be instantiated before it can be used.
+Any list of the right length will do, and the proof supplies
+$\mathtt{repeat}\;\tint\;n$, whose length is $n$ by
+\texttt{repeat\_length}.  With that, either $t_1$ is a value and
+\textsc{E-Let} fires, or it steps and \textsc{E-Let1} propagates.
 \end{proof}
 
 \subsection{Preservation}
@@ -536,110 +516,140 @@ so that \textsc{E-Beta} applies.  \textsc{S-Let}: if $t_1$ is a value then
 \end{theorem}
 
 \begin{proof}[Shape of the proof]
-Induction on the step derivation, inverting the typing derivation in each case.
-The congruence rules rebuild the same typing rule around the induction
-hypothesis, and \textsc{E-Add} is closed by \textsc{S-Int}.  The two
-substituting rules are where the work is.  \textsc{E-Beta} inverts
-\textsc{S-App} and then \textsc{S-Lam} to expose
-$\Gamma, x{:}\tau_1 \vdash t : \tau_2$ and $\vdash v : \tau_1$, which are the
-two hypotheses of the substitution lemma.  \textsc{E-Let} inverts
-\textsc{S-Let} and applies the same lemma.
+Induction on the step derivation, inverting the typing derivation in each
+case.  The congruence rules (\textsc{E-Add1}, \textsc{E-Add2},
+\textsc{E-App1}, \textsc{E-App2}) rebuild the same rule around the induction
+hypothesis.  \textsc{E-Add} is closed by \textsc{S-Int}.  Two cases matter:
+
+\emph{\textsc{E-Beta}.}  Inverting \textsc{S-App} and then \textsc{S-Lam}
+gives $\Gamma, x{:}\forall^{0}.\,\tau_1 \vdash t : \tau_2$ and
+$\vdash v : \tau_1$.  The substitution lemma wants $v$ typeable at every
+instance of $\forall^{0}.\,\tau_1$; by \texttt{inst\_mono\_inv} there is only
+$\tau_1$, so the hypothesis at hand is enough.
+
+\emph{\textsc{E-Let}.}  Inverting \textsc{S-Let} gives precisely
+``$v$ is typeable at every instance of $\forall^{n}.\,\tau_0$'' together with
+$\Gamma, x{:}\forall^{n}.\,\tau_0 \vdash t_2 : \tau$.  These are the two
+hypotheses of the substitution lemma verbatim, and the polymorphic case closes
+without further work.  This is the pay-off of stating \textsc{S-Let}
+semantically.
+
+\emph{\textsc{E-Let1}.}  The bound expression steps.  The new
+\textsc{S-Let} premise is obtained by instantiating the old one at each
+$\bar\tau$ and passing the result through the induction hypothesis.
 \end{proof}
 
-\texttt{type\_safety} is stated as a corollary and is definitionally
+\subsection{Worked example: polymorphism is used}
+
+$\mathit{id} = \lambda x.\,x$ is shown typeable at every instance of
+$\forall^{1}.\,\#0 \to \#0$: for any $\bar\tau = \tau$,
+$\mathtt{open}\,[\tau]\,(\#0 \to \#0) = \tau \to \tau$, and
+\textsc{S-Lam} followed by \textsc{S-Var} with \texttt{inst\_mono} derives
+$\vdash \lambda x.\,x : \tau \to \tau$ generically.  That premise feeds
+\textsc{S-Let} and gives
+\[
+  \vdash \mathtt{let}\;\mathit{id} = \lambda x.\,x\;\mathtt{in}\;
+  (\mathit{id}\;\mathit{id})\;42 \;:\; \tint,
+\]
+with the two occurrences instantiated at $[\tint \to \tint]$ and $[\tint]$.
+The program is then stepped once by \textsc{E-Let} and re-typed through
 \texttt{preservation}.
 
-\subsection{Checked example}
-
-\[
-  \mathtt{let}\;f = \lambda x{:}\tint.\,x + 1\;\mathtt{in}\;f\;41
-\]
-is proved to have type $\tint$, stepped once by \textsc{E-Let}, and re-typed
-through \texttt{preservation}.
-
 % =====================================================================
-\section{How to read these results}
-\label{sec:reading}
+\section{Two views of generalization}
 
-Both files compile and every stated result is closed with \texttt{Qed}.  What
-they assert, however, is narrower than their names suggest, and this section
-says how much.
+The two files treat generalization from the two standard angles, and the
+difference is deliberate.
 
-\subsection{The soundness theorem is a restatement}
+\begin{center}
+\begin{tabular}{lll}
+  & \texttt{HMSoundness.v} & \texttt{HMTypeSafety.v} \\
+  \hline
+  form & syntactic & semantic \\
+  rule & $\bar\alpha \cap \ftv(\Gamma) = \emptyset$
+       & typeable at every instance \\
+  binding of $\bar\alpha$ & named & de Bruijn \\
+  environments & association lists & functions \\
+  needs $\ftv(\Gamma)$ & yes & no \\
+\end{tabular}
+\end{center}
 
-Compare the two systems rule by rule.  \textsc{I-Var} and \textsc{T-Var} have
-the same two premises; \textsc{I-Int} and \textsc{T-Int} have none;
-\textsc{I-Lam}, \textsc{I-App} and \textsc{I-Let} agree with \textsc{T-Lam},
-\textsc{T-App} and \textsc{T-Let} premise for premise.  The two relations are
-therefore \emph{the same relation}, presented twice, and
-\texttt{hm\_infer\_sound} is proved by sending each constructor to its twin.
+The semantic form is what lets the safety proof close without a type
+substitution lemma and without freshness machinery.  It is a standard
+presentation, but it is not the syntactic \textsc{Gen} rule; a reader after
+that rule should look at \texttt{HMSoundness.v}.  Relating the two --- proving
+that the syntactic generalization satisfies the semantic condition --- is the
+natural next step and is not done here.
 
-This is not a defect in the proof --- the proof is correct --- but it means the
-theorem carries no information about type inference.  In particular:
+\section{Scope and limitations}
+\label{sec:limits}
 
-\begin{itemize}
-  \item no unification algorithm is defined, so nothing is proved about one;
-  \item instantiation is the identity (Remark~\ref{rem:inst}), so the theorem
-  says nothing about using a scheme at several types;
-  \item generalization is unconstrained (Remark~\ref{rem:gen}), so the
-  Damas--Milner side condition is neither assumed nor established.
-\end{itemize}
-
-To make the statement carry content one would let \textsc{Inst} substitute for
-the quantified variables, give \textsc{Gen} the condition
-$\bar\alpha \cap \ftv(\Gamma) = \emptyset$ --- which requires environments to
-be association lists, so that $\ftv(\Gamma)$ can be computed --- and let the
-algorithmic system compute a particular scheme rather than choose one.  The two
-systems would then differ, and soundness would have to prove that what the
-algorithm computes satisfies what the declarative system demands.
-
-\subsection{The safety theorem is about a simply typed language}
-
-By Remarks~\ref{rem:notvars} and~\ref{rem:mono}, \texttt{HMTypeSafety.v} has no
-type variables, no schemes and no polymorphic \texttt{let}.  Progress and
-preservation are proved, and proved properly --- the substitution lemma,
-context invariance, weakening and canonical forms are all there --- but for the
-simply typed lambda calculus with \texttt{let} and addition.  Nothing
-Hindley--Milner occurs in it.
-
-The two files also do not connect: the type language of
-Section~\ref{sec:safe-syntax} is not that of Section~\ref{sec:sound-syntax}, so
-a program typed by \texttt{hm\_infer\_sound} is not thereby a program to which
-\texttt{progress} applies.
-
-\subsection{Not covered}
+This is \emph{not} a verification of the MiniML implementation.  What is proved
+is proved about the two systems above, and the gap to the SML code in this
+repository is wide.  The following remain future work.
 
 \begin{itemize}
-  \item a concrete unification algorithm and its correctness;
-  \item the occurs check;
+  \item correctness of a concrete unification algorithm: \textsc{I-Lam} still
+  guesses $\tau_1$ and \textsc{I-App} still assumes the function already has an
+  arrow type, which is the shape unification would deliver on success;
+  \item correctness of the occurs check;
   \item a principal type theorem;
-  \item polymorphism in the language that is proved safe;
-  \item recursion: neither file has \texttt{let rec}, so nothing here bears on
-  recursive definitions;
-  \item lists, pairs, pattern matching, references, exceptions;
-  \item any correspondence with the OCaml prover in this repository
-  (\texttt{w.ml}, \texttt{typing\_thm.ml}, \texttt{prove.ml} and the rest).
-  The Coq development and the OCaml code were written separately, and no
-  theorem relates them.
+  \item bridging the syntactic and the semantic accounts of generalization;
+  \item recursion: MiniML is built on \texttt{let rec} and neither file has it,
+  so nothing here says anything about recursive definitions;
+  \item lists, pairs, and pattern matching;
+  \item correspondence with the SML implementation.
 \end{itemize}
+
+\subsection{A counterexample the proofs do not cover}
+
+MiniML gives the comparison operators the type
+$\forall\alpha.\,\alpha \times \alpha \to \tbool$, but functional values cannot
+be compared at run time.  The following is accepted by the type checker and
+then fails:
+
+\begin{lstlisting}
+## let f x = x;
+f : for all 'a, ('a -> 'a) = <fun>
+## f = f;
+Runtime error: these values cannot be compared.
+\end{lstlisting}
+
+This is a counterexample to progress for MiniML as it stands.  Neither Coq file
+contains comparison operators, so neither rules it out; within the language
+each of them does describe, the theorems hold.  Repairing MiniML would mean
+introducing equality types, as Standard ML does with \texttt{''a}, or making
+comparison monomorphic again.
 
 \section{Verification}
 
+The proofs were checked with the Rocq Prover 9.1.0:
+
 \begin{lstlisting}
+cd coq/hm-soundness
 coqc HMSoundness.v
 coqc HMTypeSafety.v
 \end{lstlisting}
 
-Both compile.  Neither file contains \texttt{Admitted}, \texttt{admit} or
-\texttt{Axiom}, so every stated result is fully proved from the definitions
-above --- which is precisely why Section~\ref{sec:reading} matters.  The proofs
-are sound about the systems they define, and those systems are smaller than
-their names.
-
-The report is built with:
+Both compile with exit status 0 and no output beyond a deprecation warning for
+\texttt{From Coq}, which recent versions spell \texttt{From Stdlib}.  There is
+no \texttt{Admitted}, no \texttt{admit} and no \texttt{Axiom} in either file;
+the 38 proofs are all closed with \texttt{Qed}.  The main theorems were
+additionally audited for hidden assumptions,
 
 \begin{lstlisting}
-pdflatex -interaction=nonstopmode hm_safety_report.tex   # run twice
+Print Assumptions hm_infer_sound.
+Print Assumptions progress.
+Print Assumptions preservation.
+\end{lstlisting}
+
+and each answers \texttt{Closed under the global context}, so none of them
+rests on an added axiom.
+
+The LaTeX report was built with:
+
+\begin{lstlisting}
+pdflatex -interaction=nonstopmode hm_safety_report.tex
 \end{lstlisting}
 
 \end{document}
