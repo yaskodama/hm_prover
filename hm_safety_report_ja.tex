@@ -12,6 +12,7 @@
 
 \newtheorem{theorem}{定理}
 \newtheorem{lemma}[theorem]{補題}
+\newtheorem{corollary}[theorem]{系}
 
 \lstdefinelanguage{Coq}{
   morekeywords={
@@ -791,7 +792,141 @@ $\vdash \lambda x.\,x : \tau \to \tau$ が一般に導ける。この前提が
 繋ぐこと、すなわち構文的な一般化が意味論的な条件を満たすことの証明は、自然な
 次の一歩であり、ここでは行っていない。
 
-\section{範囲と限界}
+\section{限界の突破: 再帰、多段の安全性、occurs check}
+\label{sec:beyond}
+
+前節までの体系には、繰り返し「対象外」と記してきた欠落があった。本節はそのうち
+三つを埋める。いずれも Coq で証明済みで、追加公理に依存しない。
+
+\subsection{再帰を入れる}
+
+MiniML の中核は \texttt{let rec} であるのに、型安全性の証明に再帰が無かった。
+再帰関数を項に加える。
+\[
+  t \;::=\; \dots \mid \mathtt{fix}\;f\;x.\,t
+\]
+$\mathtt{fix}\;f\;x.\,t$ は値であり、自分自身の名前 $f$ が本体で使える。
+
+\begin{mathpar}
+  \inferrule*[right=S-Fix]
+    {\Gamma, f{:}\forall^{0}.(\tau_1 \to \tau_2), x{:}\forall^{0}.\tau_1
+       \vdash t : \tau_2}
+    {\Gamma \vdash \mathtt{fix}\;f\;x.\,t : \tau_1 \to \tau_2}
+  \and
+  \inferrule*[right=E-FixApp]
+    {\mathrm{value}(v)}
+    {(\mathtt{fix}\;f\;x.\,t)\,v \step
+       \subst{\bigl(\subst{t}{x}{v}\bigr)}{f}{\mathtt{fix}\;f\;x.\,t}}
+\end{mathpar}
+
+\textsc{S-Fix} は、これから作る矢印型で $f$ を単相に束縛したうえで本体を型付ける。
+\textsc{E-FixApp} は引数を代入し、続いて再帰を一段ほどく。
+
+\paragraph{何が変わったか。}
+\textsc{S-Fix} が増えたことで、既存の証明すべてに新しい場合が生じた。
+
+\emph{標準形の補題。} 関数型の値はもはやラムダとは限らない。結論を選言に変える。
+\[
+  \mathrm{value}(v),\; \vdash v : \tau_1 \to \tau_2
+  \;\Longrightarrow\;
+  (\exists x, t.\; v = \lambda x.\,t) \;\lor\;
+  (\exists f, x, t.\; v = \mathtt{fix}\;f\;x.\,t)
+\]
+
+\emph{progress。} 適用の場合がこの選言で分岐する。関数がラムダなら
+\textsc{E-Beta}、再帰関数なら \textsc{E-FixApp} が発火する。証人が二通りになった
+だけで、詰まらないことは変わらない。
+
+\emph{代入補題。} $\mathtt{fix}\;f\;x.\,t$ は束縛を\emph{二つ}持つので、代入する
+変数がどちらに一致するかで四つの場合に分かれる。$f$ と一致、$x$ と一致、両方と
+一致、どちらとも異なる、である。前三者では代入が止まり、環境の付け替えを
+\texttt{context\_invariance} で行う。最後の場合だけ代入が本体に入り、帰納法の
+仮定を使う。
+
+\emph{preservation。} \textsc{E-FixApp} の場合が新しい。代入補題を\emph{二度}
+使う。まず外側の束縛 $x$ を剥がして引数 $v$ を代入し、次に残った束縛 $f$ を
+剥がして再帰関数自身を代入する。環境
+$(\Gamma, f{:}\tau_1 \to \tau_2), x{:}\tau_1$ の $x$ が外側にあるので、この順序
+なら束縛を順に剥がすだけで済み、$f$ と $x$ の相異を仮定する必要がない。
+
+\begin{mathpar}
+  \inferrule*[right={\scriptsize 代入補題（$f$ を剥がす）}]
+    {\inferrule*[Right={\scriptsize 代入補題（$x$ を剥がす）}]
+       {(\emptyset, f{:}\tau_1 \to \tau_2), x{:}\tau_1 \vdash t : \tau_2
+        \\ \vdash v : \tau_1}
+       {\emptyset, f{:}\tau_1 \to \tau_2 \vdash \subst{t}{x}{v} : \tau_2}
+     \\
+     \vdash \mathtt{fix}\;f\;x.\,t : \tau_1 \to \tau_2}
+    {\vdash \subst{\bigl(\subst{t}{x}{v}\bigr)}{f}{\mathtt{fix}\;f\;x.\,t}
+       : \tau_2}
+\end{mathpar}
+
+\subsection{多段の安全性}
+
+単段の preservation は「一歩進んでも型が保たれる」としか言わない。本来主張したい
+のは「型の付いた閉じた項は、何歩進んでも\emph{詰まった状態}に到達しない」である。
+\[
+  \mathrm{stuck}(t) \;\equiv\;
+    \neg\,\mathrm{value}(t) \;\land\; \neg\,\exists t'.\; t \step t'
+\]
+
+\begin{theorem}[\texttt{soundness}]
+  $\vdash t : \tau$ かつ $t \step^{*} t'$ ならば $\neg\,\mathrm{stuck}(t')$。
+\end{theorem}
+
+\begin{proof}
+まず多段版の preservation を、$t \step^{*} t'$ の導出に関する帰納法で示す。
+反射の場合は仮定そのもの、推移の場合は単段の preservation を一度使ってから
+帰納法の仮定に渡す。これで $\vdash t' : \tau$ が得られる。あとは $t'$ に
+progress を適用すれば、$t'$ は値であるか一歩進むかのいずれかであり、どちらも
+$\mathrm{stuck}(t')$ の二つの連言肢と矛盾する。
+\end{proof}
+
+これが「型の付いたプログラムは誤らない」の完全な形である。
+
+\paragraph{停止性は主張していない。}
+再帰が入った以上、型が付いても止まらない項が書ける。実際
+$\mathtt{fix}\;f\;x.\,f\,x$ は任意の $\tau_1 \to \tau_2$ に型が付き、
+$(\mathtt{fix}\;f\;x.\,f\,x)\,0$ は自分自身へ簡約される。この項について
+\texttt{loop\_never\_stuck} を証明してある。永遠に走り続けることと詰まることは
+別であり、型安全性が保証するのは後者が起きないことだけである。この区別が
+はっきり見えるようになったのは、再帰を入れたからである。
+
+\subsection{occurs check}
+
+単一化は、変数 $\alpha$ がその型の内部に真に現れるとき、方程式
+$\alpha = \tau$ を拒否しなければならない。これは約束事ではなく定理である。
+
+\begin{theorem}[\texttt{occurs\_check\_sound}]
+  $\alpha$ が $\tau_1 \to \tau_2$ に出現するならば、
+  $s(\alpha) = s(\tau_1 \to \tau_2)$ を満たす代入 $s$ は存在しない。
+\end{theorem}
+
+\begin{proof}
+型の大きさ $\mathrm{size}$ を、$\tint$ と変数を $1$、
+$\mathrm{size}(\tau_1 \to \tau_2) = 1 + \mathrm{size}(\tau_1) +
+\mathrm{size}(\tau_2)$ と定める。
+
+補題を二つ用意する。第一に、$\alpha$ が $\tau$ のどこかに現れるなら、任意の $s$
+について $\mathrm{size}(s(\alpha)) \leq \mathrm{size}(s(\tau))$。これは $\tau$ に
+関する帰納法で、矢印の場合は出現がどちらの枝にあるかで分ける。第二に、$\alpha$
+が矢印型に現れるなら不等号は\emph{狭義}になる。矢印の $\mathrm{size}$ が両枝の和
+より $1$ 大きく、どの型の $\mathrm{size}$ も $1$ 以上だからである。
+
+さて $s(\alpha) = s(\tau_1 \to \tau_2)$ を満たす $s$ があったとする。第二の補題は
+$\mathrm{size}(s(\alpha)) < \mathrm{size}(s(\tau_1 \to \tau_2))$ を与えるが、
+仮定でこの二つは同じ項なので $n < n$ となり矛盾する。
+\end{proof}
+
+\begin{corollary}
+  $\alpha = \alpha \to \alpha$ は解を持たない。
+\end{corollary}
+
+これはちょうど $\lambda x.\,x\,x$ を素朴に単一化したときに現れる方程式である。
+occurs check は、そこでアルゴリズムが停止せずに無限に型を作り続けるのを
+止めている。
+
+\section{なお残る範囲と限界}
 \label{sec:limits}
 
 これは MiniML 実装の検証では\emph{ない}。証明されたのは上の二つの体系に
@@ -799,17 +934,18 @@ $\vdash \lambda x.\,x : \tau \to \tau$ が一般に導ける。この前提が
 ある。
 
 \begin{itemize}
-  \item 具体的な単一化アルゴリズムの正しさ。\textsc{I-Lam} は依然として
-  $\tau_1$ を推測し、\textsc{I-App} は関数が既に矢印型であることを前提にする。
-  これは単一化が成功したときに得られる形である。
-  \item occurs check の正しさ。
+  \item 単一化アルゴリズムそのもの。occurs check の必要性は第\ref{sec:beyond}節で
+  証明したが、単一化の手続きを定義してその健全性と完全性を示してはいない。
+  \textsc{I-Lam} は依然として $\tau_1$ を推測し、\textsc{I-App} は関数が既に
+  矢印型であることを前提にする。
   \item principal type 定理。
   \item 構文的な一般化と意味論的な一般化の橋渡し。
-  \item 再帰。MiniML の中核は \texttt{let rec} であるが、どちらのファイルにも
-  再帰は無いので、再帰的定義について本証明は何も述べていない。
   \item リスト、組、パターン照合。
   \item SML 実装との対応証明。
 \end{itemize}
+
+再帰と多段の安全性は第\ref{sec:beyond}節で埋めた。以前この一覧にあった
+「再帰」と「occurs check」は、そこへ移っている。
 
 \subsection{証明が覆っていない反例}
 

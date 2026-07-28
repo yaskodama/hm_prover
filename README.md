@@ -8,9 +8,17 @@ This project contains Coq proofs for a small Hindley-Milner-style language.
   quantified variables and generalization carries the Damas-Milner side
   condition, so the algorithmic and declarative systems genuinely differ and
   the theorem has an obligation to discharge (`gen_max_ok`).
-- `HMTypeSafety.v`: progress and preservation for a polymorphic core.  Types
-  have variables, environments map to schemes and `let` is polymorphic;
-  quantified variables are de Bruijn indices, which rules out capture.
+- `HMTypeSafety.v`: progress and preservation for a polymorphic core with
+  recursion.  Types have variables, environments map to schemes and `let` is
+  polymorphic; quantified variables are de Bruijn indices, which rules out
+  capture.  `fix f x. t` is in the language, so the proof now covers what
+  MiniML's `let rec` elaborates to.  Beyond single-step preservation it proves
+  `soundness`: a well-typed closed term never reaches a stuck state, however
+  many steps it takes.  Termination is deliberately not claimed -- a
+  well-typed divergent term is given, and shown never to get stuck.
+- `HMSoundness.v` also proves the occurs check: if a variable occurs under an
+  arrow in a type, no substitution solves the equation between them, so
+  unification is right to refuse it.
 - `hm_safety_report_ja.tex`: the report, in Japanese.  This is the one to read.
 - `hm_safety_report.tex`: the same report in English.
 

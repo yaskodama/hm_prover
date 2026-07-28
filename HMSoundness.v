@@ -1,4 +1,4 @@
-From Coq Require Import List Arith.PeanoNat Bool.Bool.
+From Coq Require Import List Arith.PeanoNat Bool.Bool Lia.
 Import ListNotations.
 
 (*
@@ -256,6 +256,83 @@ Proof.
     + apply gen_max_ok.          (* here the side condition must be discharged *)
     + exact IHhm_infer2.
 Qed.
+
+(* ------------------------------------------------------------------ *)
+(* The occurs check                                                    *)
+(* ------------------------------------------------------------------ *)
+
+(* Unification must refuse an equation  alpha = tau  when alpha occurs
+   properly inside tau, because no substitution can solve it.  That is a
+   theorem, not a convention, and it is proved here by a size argument:
+   applying any substitution to a type in which alpha occurs yields something
+   at least as large as what it yields on alpha alone, and strictly larger
+   when alpha sits under an arrow. *)
+
+Fixpoint tsize (T : ty) : nat :=
+  match T with
+  | TInt => 1
+  | TVar _ => 1
+  | TArrow A B => S (tsize A + tsize B)
+  end.
+
+Fixpoint occurs (a : nat) (T : ty) : bool :=
+  match T with
+  | TInt => false
+  | TVar b => Nat.eqb a b
+  | TArrow A B => orb (occurs a A) (occurs a B)
+  end.
+
+Lemma tsize_pos : forall T, 1 <= tsize T.
+Proof. induction T; simpl; lia. Qed.
+
+(* If alpha occurs anywhere in T, then s(alpha) is no larger than s(T). *)
+Lemma occurs_size_le :
+  forall a T s, occurs a T = true -> tsize (s a) <= tsize (appT s T).
+Proof.
+  intros a T s. induction T; simpl; intros Hocc.
+  - discriminate.
+  - apply Nat.eqb_eq in Hocc. subst. simpl. lia.
+  - apply orb_true_iff in Hocc. destruct Hocc as [H1 | H2].
+    + specialize (IHT1 H1). lia.
+    + specialize (IHT2 H2). lia.
+Qed.
+
+(* If alpha occurs under an arrow, the inequality is strict. *)
+Lemma occurs_size_lt :
+  forall a A B s,
+    occurs a (TArrow A B) = true ->
+    tsize (s a) < tsize (appT s (TArrow A B)).
+Proof.
+  intros a A B s Hocc. simpl in Hocc. apply orb_true_iff in Hocc.
+  simpl.
+  pose proof (tsize_pos (appT s A)) as HA.
+  pose proof (tsize_pos (appT s B)) as HB.
+  destruct Hocc as [H1 | H2].
+  - pose proof (occurs_size_le a A s H1). lia.
+  - pose proof (occurs_size_le a B s H2). lia.
+Qed.
+
+(* Hence the equation has no solution: this is the occurs check. *)
+Theorem occurs_check_sound :
+  forall a A B,
+    occurs a (TArrow A B) = true ->
+    ~ exists s, appT s (TVar a) = appT s (TArrow A B).
+Proof.
+  intros a A B Hocc [s Heq].
+  pose proof (occurs_size_lt a A B s Hocc) as Hlt.
+  simpl in Heq. rewrite Heq in Hlt. simpl in Hlt. lia.
+Qed.
+
+(* Concretely: alpha = alpha -> alpha is unsolvable. *)
+Corollary self_arrow_unsolvable :
+  forall a, ~ exists s, appT s (TVar a) = appT s (TArrow (TVar a) (TVar a)).
+Proof.
+  intros a. apply occurs_check_sound. simpl. now rewrite Nat.eqb_refl.
+Qed.
+
+(* Without the occurs check, that equation is exactly what naive unification
+   of  (fun x -> x x)  produces, so the check is what stops the algorithm
+   from looping. *)
 
 (* ------------------------------------------------------------------ *)
 (* The side condition is not vacuous                                   *)

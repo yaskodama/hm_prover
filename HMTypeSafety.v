@@ -102,7 +102,10 @@ Inductive tm : Type :=
 | TmAdd : tm -> tm -> tm
 | TmLam : nat -> tm -> tm          (* no type annotation: Curry style *)
 | TmApp : tm -> tm -> tm
-| TmLet : nat -> tm -> tm -> tm.
+| TmLet : nat -> tm -> tm -> tm
+(* fix f x. t -- the recursive function f with parameter x and body t.
+   This is what MiniML's `let rec f x = t' elaborates to. *)
+| TmFix : nat -> nat -> tm -> tm.
 
 Definition env := nat -> option scheme.
 Definition empty : env := fun _ => None.
@@ -169,11 +172,20 @@ Inductive has_type : env -> tm -> ty -> Prop :=
     forall G x e1 e2 n T0 T2,
       (forall ts, length ts = n -> has_type G e1 (open ts T0)) ->
       has_type (extend G x (Sch n T0)) e2 T2 ->
-      has_type G (TmLet x e1 e2) T2.
+      has_type G (TmLet x e1 e2) T2
+(* The recursive function may call itself: its own name is in scope in the
+   body, bound monomorphically at the arrow type being built.  Note that no
+   side condition relates f and x; the proof goes through either way because
+   the two substitutions in ST_FixApp peel the two bindings in order. *)
+| TyFix :
+    forall G f x body T1 T2,
+      has_type (extend (extend G f (Mono (TArrow T1 T2))) x (Mono T1)) body T2 ->
+      has_type G (TmFix f x body) (TArrow T1 T2).
 
 Inductive value : tm -> Prop :=
 | VInt : forall n, value (TmInt n)
-| VLam : forall x body, value (TmLam x body).
+| VLam : forall x body, value (TmLam x body)
+| VFix : forall f x body, value (TmFix f x body).
 
 Fixpoint subst (x : nat) (s : tm) (t : tm) : tm :=
   match t with
@@ -184,6 +196,10 @@ Fixpoint subst (x : nat) (s : tm) (t : tm) : tm :=
   | TmApp f a => TmApp (subst x s f) (subst x s a)
   | TmLet y e1 e2 =>
       TmLet y (subst x s e1) (if Nat.eqb x y then e2 else subst x s e2)
+  | TmFix f y body =>
+      (* both f and y bind in the body *)
+      if orb (Nat.eqb x f) (Nat.eqb x y) then TmFix f y body
+      else TmFix f y (subst x s body)
   end.
 
 Inductive step : tm -> tm -> Prop :=
@@ -194,7 +210,14 @@ Inductive step : tm -> tm -> Prop :=
 | ST_App1 : forall f f' a, step f f' -> step (TmApp f a) (TmApp f' a)
 | ST_App2 : forall v a a', value v -> step a a' -> step (TmApp v a) (TmApp v a')
 | ST_LetValue : forall x v body, value v -> step (TmLet x v body) (subst x v body)
-| ST_Let1 : forall x e1 e1' e2, step e1 e1' -> step (TmLet x e1 e2) (TmLet x e1' e2).
+| ST_Let1 : forall x e1 e1' e2, step e1 e1' -> step (TmLet x e1 e2) (TmLet x e1' e2)
+(* Applying a recursive function substitutes the argument, then unfolds the
+   recursion by substituting the function itself for its own name. *)
+| ST_FixApp :
+    forall f x body v,
+      value v ->
+      step (TmApp (TmFix f x body) v)
+           (subst f (TmFix f x body) (subst x v body)).
 
 (* ------------------------------------------------------------------ *)
 (* Structural lemmas about the environment                             *)
@@ -218,6 +241,9 @@ Proof.
     + intros ts Hlen. apply H0; [ exact Hlen | exact Heq ].
     + apply IHhas_type. intros y.
       unfold extend. destruct (Nat.eqb x y); auto.
+  - apply TyFix. apply IHhas_type. intros y.
+    unfold extend. destruct (Nat.eqb x y); [ reflexivity | ].
+    destruct (Nat.eqb f y); auto.
 Qed.
 
 Definition env_extends (G G' : env) : Prop :=
@@ -243,6 +269,10 @@ Proof.
     + apply IHHty. unfold env_extends in *.
       intros y Ty Hy. unfold extend in *.
       destruct (Nat.eqb x y); eauto.
+  - apply TyFix. apply IHHty. unfold env_extends in *.
+    intros y Ty Hy. unfold extend in *.
+    destruct (Nat.eqb x y); [ exact Hy | ].
+    destruct (Nat.eqb f y); eauto.
 Qed.
 
 Lemma weaken_empty :
@@ -316,6 +346,53 @@ Proof.
         apply context_invariance with (G := extend (extend G x Sg) n (Sch n0 T0)).
         -- apply extend_permute. exact Exn.
         -- assumption.
+  - (* TmFix f y body : two binders, so three cases *)
+    destruct (Nat.eqb x n) eqn:Exf; destruct (Nat.eqb x n0) eqn:Exy; simpl.
+    + (* x = f, and x = y : the inner binding of y hides everything *)
+      apply Nat.eqb_eq in Exf. apply Nat.eqb_eq in Exy. subst.
+      apply TyFix.
+      apply context_invariance
+        with (G := extend (extend (extend G n0 Sg) n0 (Mono (TArrow T1 T2)))
+                          n0 (Mono T1)).
+      * intros z. unfold extend. destruct (Nat.eqb n0 z); reflexivity.
+      * assumption.
+    + (* x = f only : substitution stops at the binder for f *)
+      apply Nat.eqb_eq in Exf. subst.
+      apply Nat.eqb_neq in Exy.
+      apply TyFix.
+      apply context_invariance
+        with (G := extend (extend (extend G n Sg) n (Mono (TArrow T1 T2)))
+                          n0 (Mono T1)).
+      * intros z. unfold extend.
+        destruct (Nat.eqb n0 z); [ reflexivity | ].
+        destruct (Nat.eqb n z); reflexivity.
+      * assumption.
+    + (* x = y only : substitution stops at the binder for y *)
+      apply Nat.eqb_eq in Exy. subst.
+      apply Nat.eqb_neq in Exf.
+      apply TyFix.
+      apply context_invariance
+        with (G := extend (extend (extend G n0 Sg) n (Mono (TArrow T1 T2)))
+                          n0 (Mono T1)).
+      * intros z. unfold extend.
+        destruct (Nat.eqb n0 z); [ reflexivity | ].
+        destruct (Nat.eqb n z); reflexivity.
+      * assumption.
+    + (* x is neither : the substitution goes under both binders *)
+      apply Nat.eqb_neq in Exf. apply Nat.eqb_neq in Exy.
+      apply TyFix.
+      eapply IHt with (Sg := Sg); [ | exact Hv ].
+      apply context_invariance
+        with (G := extend (extend (extend G x Sg) n (Mono (TArrow T1 T2)))
+                          n0 (Mono T1)).
+      * intros z. unfold extend.
+        destruct (Nat.eqb n0 z) eqn:E0; destruct (Nat.eqb n z) eqn:E1;
+          destruct (Nat.eqb x z) eqn:E2; try reflexivity;
+          try (apply Nat.eqb_eq in E0);
+          try (apply Nat.eqb_eq in E1);
+          try (apply Nat.eqb_eq in E2);
+          subst; try contradiction; try reflexivity.
+      * assumption.
 Qed.
 
 (* ------------------------------------------------------------------ *)
@@ -325,16 +402,19 @@ Qed.
 Lemma canonical_int :
   forall v, value v -> has_type empty v TInt -> exists n, v = TmInt n.
 Proof.
-  intros v Hv Ht. inversion Hv; subst; eauto. inversion Ht.
+  intros v Hv Ht. inversion Hv; subst; eauto; inversion Ht.
 Qed.
 
+(* With recursion, a value of function type is a lambda or a fix. *)
 Lemma canonical_arrow :
   forall v T1 T2,
-    value v -> has_type empty v (TArrow T1 T2) -> exists x body, v = TmLam x body.
+    value v -> has_type empty v (TArrow T1 T2) ->
+    (exists x body, v = TmLam x body) \/ (exists f x body, v = TmFix f x body).
 Proof.
   intros v T1 T2 Hv Ht. inversion Hv; subst.
   - inversion Ht.
-  - eauto.
+  - left. eauto.
+  - right. eauto.
 Qed.
 
 (* ------------------------------------------------------------------ *)
@@ -359,8 +439,12 @@ Proof.
   - left. constructor.
   - destruct IHHt1 as [Hvf | [f' Hf']]; auto.
     + destruct IHHt2 as [Hva | [a' Ha']]; auto.
-      * right. destruct (canonical_arrow f T1 T2 Hvf Ht1) as [x [body ->]].
-        exists (subst x a body). constructor; auto.
+      * right.
+        destruct (canonical_arrow f T1 T2 Hvf Ht1)
+          as [[x [body ->]] | [g [x [body ->]]]].
+        -- exists (subst x a body). constructor; auto.
+        -- exists (subst g (TmFix g x body) (subst x a body)).
+           constructor; auto.
       * right. exists (TmApp f a'). constructor; auto.
     + right. exists (TmApp f' a). constructor; auto.
   - (* TmLet: use the instance at a list of the right length *)
@@ -368,6 +452,8 @@ Proof.
     destruct (H0 (repeat TInt n) Hlen eq_refl) as [Hv1 | [e1' He1']].
     + right. exists (subst x e1 e2). constructor; auto.
     + right. exists (TmLet x e1' e2). constructor; auto.
+  - (* TmFix is a value *)
+    left. constructor.
 Qed.
 
 Theorem preservation :
@@ -399,11 +485,123 @@ Proof.
       | Hp : forall l : list ty, _ |- _ => apply Hp; exact Hlen
       end.
     + eassumption.
+  - (* applying a recursive function: two substitutions in a row *)
+    match goal with
+    | Hfun : has_type empty (TmFix f x body) (TArrow _ _) |- _ =>
+        inversion Hfun; subst; rename Hfun into Hfix
+    end.
+    (* first the argument, peeling the binding of x *)
+    eapply substitution_preserves_typing with (Sg := Mono (TArrow T1 T0)).
+    + eapply substitution_preserves_typing with (Sg := Mono T1).
+      * eassumption.
+      * intros T' Hi. apply inst_mono_inv in Hi. subst. assumption.
+    + (* then the function itself, peeling the binding of f *)
+      intros T' Hi. apply inst_mono_inv in Hi. subst. exact Hfix.
 Qed.
 
 Theorem type_safety :
   forall t t' T, has_type empty t T -> step t t' -> has_type empty t' T.
 Proof. apply preservation. Qed.
+
+(* ------------------------------------------------------------------ *)
+(* Safety over many steps: well-typed programs do not go wrong          *)
+(* ------------------------------------------------------------------ *)
+
+(* Single-step preservation only says a well-typed term stays well typed for
+   one step.  What one actually wants is that it never reaches a state that is
+   neither a value nor able to move.  That is the statement below. *)
+
+Inductive steps : tm -> tm -> Prop :=
+| StepsRefl : forall t, steps t t
+| StepsTrans : forall t1 t2 t3, step t1 t2 -> steps t2 t3 -> steps t1 t3.
+
+Definition stuck (t : tm) : Prop :=
+  ~ value t /\ ~ (exists t', step t t').
+
+Lemma preservation_multi :
+  forall t t' T, has_type empty t T -> steps t t' -> has_type empty t' T.
+Proof.
+  intros t t' T Ht Hs. generalize dependent T.
+  induction Hs; intros T Ht.
+  - exact Ht.
+  - apply IHHs. eapply preservation; eassumption.
+Qed.
+
+Theorem soundness :
+  forall t t' T, has_type empty t T -> steps t t' -> ~ stuck t'.
+Proof.
+  intros t t' T Ht Hs [Hnv Hns].
+  assert (Ht' : has_type empty t' T) by (eapply preservation_multi; eassumption).
+  destruct (progress t' T Ht') as [Hv | Hstep].
+  - apply Hnv. exact Hv.
+  - apply Hns. exact Hstep.
+Qed.
+
+(* ------------------------------------------------------------------ *)
+(* A recursive program, typed and run                                   *)
+(* ------------------------------------------------------------------ *)
+
+(* fix f x. x  --  a recursive function that ignores the recursion *)
+Definition rec_id : tm := TmFix 0 1 (TmVar 1).
+
+Lemma rec_id_typed : forall T, has_type empty rec_id (TArrow T T).
+Proof.
+  intros T. unfold rec_id. apply TyFix.
+  eapply TyVar; [ apply extend_eq | apply inst_mono ].
+Qed.
+
+Lemma rec_id_applies :
+  step (TmApp rec_id (TmInt 7)) (TmInt 7).
+Proof.
+  unfold rec_id.
+  replace (TmInt 7)
+     with (subst 0 (TmFix 0 1 (TmVar 1)) (subst 1 (TmInt 7) (TmVar 1)))
+     at 2 by reflexivity.
+  apply ST_FixApp. constructor.
+Qed.
+
+Theorem rec_id_safe :
+  has_type empty (TmApp rec_id (TmInt 7)) TInt /\
+  has_type empty (TmInt 7) TInt.
+Proof.
+  split.
+  - eapply TyApp; [ apply rec_id_typed | constructor ].
+  - constructor.
+Qed.
+
+(* fix f x. f x  --  a function that loops forever.  It is well typed, so
+   type safety must not, and does not, claim termination: soundness says the
+   term never gets stuck, which is true of a divergent term. *)
+Definition loop : tm := TmFix 0 1 (TmApp (TmVar 0) (TmVar 1)).
+
+Lemma loop_typed : forall T1 T2, has_type empty loop (TArrow T1 T2).
+Proof.
+  intros T1 T2. unfold loop. apply TyFix.
+  eapply TyApp with (T1 := T1).
+  - eapply TyVar.
+    + unfold extend. simpl. reflexivity.
+    + apply inst_mono.
+  - eapply TyVar; [ apply extend_eq | apply inst_mono ].
+Qed.
+
+Lemma loop_diverges :
+  step (TmApp loop (TmInt 0)) (TmApp loop (TmInt 0)).
+Proof.
+  unfold loop.
+  replace (TmApp (TmFix 0 1 (TmApp (TmVar 0) (TmVar 1))) (TmInt 0))
+     with (subst 0 (TmFix 0 1 (TmApp (TmVar 0) (TmVar 1)))
+                 (subst 1 (TmInt 0) (TmApp (TmVar 0) (TmVar 1))))
+     at 2 by reflexivity.
+  apply ST_FixApp. constructor.
+Qed.
+
+Theorem loop_never_stuck :
+  forall t', steps (TmApp loop (TmInt 0)) t' -> ~ stuck t'.
+Proof.
+  intros t' Hs.
+  eapply soundness with (T := TInt); [ | exact Hs ].
+  eapply TyApp; [ apply loop_typed | constructor ].
+Qed.
 
 (* ------------------------------------------------------------------ *)
 (* The polymorphism is real                                            *)
