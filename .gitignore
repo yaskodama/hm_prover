@@ -9,3 +9,4 @@
 *.toc
 *.out
 __pycache__/
+.lia.cache
