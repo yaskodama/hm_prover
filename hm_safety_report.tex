@@ -581,7 +581,72 @@ that rule should look at \texttt{HMSoundness.v}.  Relating the two --- proving
 that the syntactic generalization satisfies the semantic condition --- is the
 natural next step and is not done here.
 
-\section{Scope and limitations}
+\section{Beyond the stated scope}
+\label{sec:beyond}
+
+Three things this report used to list as out of scope are now proved.  Each is
+machine-checked and depends on no added axiom.
+
+\subsection{Recursion}
+
+MiniML is built on \texttt{let rec}, yet the safety proof had no recursion in
+it.  Terms gain $\mathtt{fix}\;f\;x.\,t$, a value whose own name is in scope in
+its body.
+
+\begin{mathpar}
+  \inferrule*[right=S-Fix]
+    {\Gamma, f{:}\forall^{0}.(\tau_1 \to \tau_2), x{:}\forall^{0}.\tau_1
+       \vdash t : \tau_2}
+    {\Gamma \vdash \mathtt{fix}\;f\;x.\,t : \tau_1 \to \tau_2}
+  \and
+  \inferrule*[right=E-FixApp]
+    {\mathrm{value}(v)}
+    {(\mathtt{fix}\;f\;x.\,t)\,v \step
+       \subst{\bigl(\subst{t}{x}{v}\bigr)}{f}{\mathtt{fix}\;f\;x.\,t}}
+\end{mathpar}
+
+Every existing proof gained a case.  Canonical forms at arrow type now
+concludes a disjunction, a function value being a lambda or a fix, and
+progress branches on it.  The substitution lemma gains four cases rather than
+two, since fix has two binders and the substituted name may match either, both
+or neither; only in the last does the substitution enter the body.
+Preservation applies the substitution lemma twice for \textsc{E-FixApp},
+peeling $x$ to put the argument in and then $f$ to unfold the recursion.  As
+the environment binds $x$ outermost, the peels come in that order and no side
+condition relating $f$ and $x$ is required.
+
+\subsection{Safety over many steps}
+
+Single-step preservation is not the statement one wants.  With
+$\mathrm{stuck}(t) \equiv \neg\,\mathrm{value}(t) \land
+\neg\,\exists t'.\,t \step t'$:
+
+\begin{theorem}[\texttt{soundness}]
+  If $\vdash t : \tau$ and $t \step^{*} t'$ then $\neg\,\mathrm{stuck}(t')$.
+\end{theorem}
+
+The proof lifts preservation along the closure by induction, then applies
+progress at $t'$.  Termination is deliberately not claimed:
+$\mathtt{fix}\;f\;x.\,f\,x$ is well typed at every arrow type and steps to
+itself, and \texttt{loop\_never\_stuck} shows that running forever is not
+getting stuck.  That distinction only becomes visible with recursion present.
+
+\subsection{The occurs check}
+
+\begin{theorem}[\texttt{occurs\_check\_sound}]
+  If $\alpha$ occurs in $\tau_1 \to \tau_2$ then no substitution $s$ satisfies
+  $s(\alpha) = s(\tau_1 \to \tau_2)$.
+\end{theorem}
+
+By size.  Applying any substitution to a type in which $\alpha$ occurs yields
+something at least as large as it yields on $\alpha$ alone, and strictly larger
+under an arrow, since an arrow's size exceeds the sum of its branches and every
+size is positive.  An equation would then force $n < n$.  The corollary is that
+$\alpha = \alpha \to \alpha$ is unsolvable --- exactly the equation naive
+unification of $\lambda x.\,x\,x$ produces, so refusing it is what stops the
+algorithm from looping.
+
+\section{What is still out of scope}
 \label{sec:limits}
 
 This is \emph{not} a verification of the MiniML implementation.  What is proved
@@ -589,17 +654,19 @@ is proved about the two systems above, and the gap to the SML code in this
 repository is wide.  The following remain future work.
 
 \begin{itemize}
-  \item correctness of a concrete unification algorithm: \textsc{I-Lam} still
-  guesses $\tau_1$ and \textsc{I-App} still assumes the function already has an
-  arrow type, which is the shape unification would deliver on success;
-  \item correctness of the occurs check;
+  \item the unification procedure itself.  Its occurs check is justified in
+  Section~\ref{sec:beyond}, but no algorithm is defined and neither its
+  soundness nor its completeness is proved; \textsc{I-Lam} still guesses
+  $\tau_1$ and \textsc{I-App} still assumes the function already has an arrow
+  type, which is the shape unification would deliver on success;
   \item a principal type theorem;
   \item bridging the syntactic and the semantic accounts of generalization;
-  \item recursion: MiniML is built on \texttt{let rec} and neither file has it,
-  so nothing here says anything about recursive definitions;
   \item lists, pairs, and pattern matching;
   \item correspondence with the SML implementation.
 \end{itemize}
+
+Recursion, safety over many steps and the occurs check used to be on this list.
+They are proved in Section~\ref{sec:beyond}.
 
 \subsection{A counterexample the proofs do not cover}
 
