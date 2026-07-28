@@ -1,0 +1,840 @@
+\documentclass[11pt,a4paper]{ltjsarticle}
+\usepackage{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{amsthm}
+\usepackage{mathpartir}
+\usepackage{listings}
+\usepackage{xcolor}
+\geometry{margin=25mm}
+
+\newtheorem{theorem}{定理}
+\newtheorem{lemma}[theorem]{補題}
+\newtheorem{remark}[theorem]{注意}
+
+\lstdefinelanguage{Coq}{
+  morekeywords={
+    Inductive,Definition,Fixpoint,Lemma,Theorem,Proof,Qed,forall,exists,
+    match,with,end,fun,Prop,Type,Set,apply,eapply,constructor,intros,
+    inversion,subst,destruct,reflexivity,exact
+  },
+  sensitive=true,
+  morecomment=[n]{(*}{*)}
+}
+\lstset{
+  language=Coq,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!60!black},
+  commentstyle=\color{green!35!black},
+  breaklines=true,
+  frame=single,
+  columns=fullflexible
+}
+
+\newcommand{\tint}{\mathtt{int}}
+\newcommand{\inst}{\preceq}
+\newcommand{\gen}{\mathrm{gen}}
+\newcommand{\ftv}{\mathrm{ftv}}
+\newcommand{\subst}[3]{#1[#2 := #3]}
+\newcommand{\step}{\longrightarrow}
+
+\title{Hindley--Milner 型推論の健全性と核言語の型安全性\\\large Coq による形式化と機械検証}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本稿は、このリポジトリにある二つの Coq の形式化を述べる。\texttt{HMSoundness.v} は
+アルゴリズム的な Hindley--Milner 型推論の判断を宣言的な判断に結びつけ、
+\texttt{HMTypeSafety.v} は型付き核言語の progress と preservation を証明する。
+どちらについても、文法・型の定義・推論規則を通常の数学記法で書き下し、Coq の記述と
+対照できるようにした。また各証明を、名前を挙げるだけでなく、どう進むかまで述べる。
+第\ref{sec:reading}節は、二つの定理が何を示していて何を示していないかを率直に述べる。
+ここから結果を引く前に、まずその節を読まれたい。
+\end{abstract}
+
+\tableofcontents
+
+\section{目的}
+
+\begin{enumerate}
+  \item \textbf{型推論の健全性}: 推論の判断が式に型を与えるなら、宣言的な判断も
+  同じ型を与える。\texttt{HMSoundness.v} である。
+  \item \textbf{型安全性}: 閉じた型付き項は値であるか一歩実行でき、実行しても型が
+  保存される。\texttt{HMTypeSafety.v} である。
+\end{enumerate}
+
+二つのファイルは独立している。それぞれが自前の構文・型・判断を定義し、互いを
+読み込まない。とくに後者の型の言語は前者のそれではない。この点は
+第\ref{sec:reading}節で扱う。
+
+% =====================================================================
+\section{型推論の健全性: 文法}
+\label{sec:sound-syntax}
+
+\subsection{文法}
+
+\[
+\begin{array}{lcll}
+  e & ::= & x \mid n \mid \lambda x.\,e \mid e_1\,e_2
+            \mid \mathtt{let}\;x = e_1\;\mathtt{in}\;e_2
+    & \text{式}\\[2pt]
+  \tau & ::= & \tint \mid \alpha \mid \tau_1 \to \tau_2
+    & \text{型}\\[2pt]
+  \sigma & ::= & \tau \mid \forall \bar\alpha.\,\tau
+    & \text{型スキーム}
+\end{array}
+\]
+
+変数 $x$ と型変数 $\alpha$ は自然数、$\bar\alpha$ はその列である。Coq では次のとおり。
+
+\begin{lstlisting}
+Inductive ty : Type :=
+| TInt : ty
+| TVar : nat -> ty
+| TArrow : ty -> ty -> ty.
+
+Inductive expr : Type :=
+| EVar : nat -> expr   | EInt : nat -> expr
+| ELam : nat -> expr -> expr
+| EApp : expr -> expr -> expr
+| ELet : nat -> expr -> expr -> expr.
+
+Inductive scheme : Type :=
+| Mono : ty -> scheme
+| Forall : list nat -> ty -> scheme.
+\end{lstlisting}
+
+scheme は単相か $\forall$ の包みかのいずれかで、空の列を持つ包みではなく、
+二つの別の構成子として定義されている。
+
+\subsection{環境}
+
+環境は変数から scheme への部分写像で、関数として表す。
+\[
+  \Gamma : \mathbb{N} \to \sigma_\bot,
+  \qquad
+  \emptyset = \lambda y.\,\bot,
+  \qquad
+  (\Gamma, x{:}\sigma)(y) =
+    \begin{cases}
+      \sigma & y = x\\
+      \Gamma(y) & y \neq x
+    \end{cases}
+\]
+
+\begin{lstlisting}
+Definition env := nat -> option scheme.
+Definition empty : env := fun _ => None.
+Definition extend (G : env) (x : nat) (s : scheme) : env :=
+  fun y => if Nat.eqb x y then Some s else G y.
+\end{lstlisting}
+
+環境がリストではなく関数なので、ここでは $\ftv(\Gamma)$ を計算できない。
+下の一般化の規則に側条件が無いのはそのためである。
+
+\subsection{具体化と一般化}
+
+\begin{mathpar}
+  \inferrule*[right=Inst-Mono]
+    { }
+    {\tau \;\inst\; \tau}
+  \and
+  \inferrule*[right=Inst-Forall]
+    { }
+    {\forall\bar\alpha.\,\tau \;\inst\; \tau}
+  \and
+  \inferrule*[right=Gen-Mono]
+    { }
+    {\gen(\Gamma, \tau) \ni \tau}
+  \and
+  \inferrule*[right=Gen-Forall]
+    { }
+    {\gen(\Gamma, \tau) \ni \forall\bar\alpha.\,\tau}
+\end{mathpar}
+
+これがファイルに書かれているとおりの規則である。注意して読む価値がある。
+
+\begin{remark}[具体化は置換しない]
+\label{rem:inst}
+\textsc{Inst-Forall} は $\forall\bar\alpha.\,\tau$ を $\tau$ にのみ結びつけ、
+他の何にも結びつけない。したがって scheme はただ一つの具体化、すなわち自分の本体しか
+持たない。量化された変数が置き換わることはない。具体化は型の上の恒等写像である。
+\end{remark}
+
+\begin{remark}[一般化に側条件が無い]
+\label{rem:gen}
+\textsc{Gen-Forall} は\emph{任意の}列 $\bar\alpha$ について成り立ち、それらの変数が
+$\Gamma$ に現れないことを要求しない。Damas--Milner の条件
+$\bar\alpha \cap \ftv(\Gamma) = \emptyset$ は無い。それで破綻しないのは、
+注意~\ref{rem:inst} により量化子が決して除去されないからである。
+\textsc{Gen-Forall} が作った scheme は、自分の本体としてしか使えない。
+\end{remark}
+
+ファイル冒頭のコメント自身がそう述べている。具体化と一般化は「関係として保つ
+……自由変数の集合と置換の特定の実装には踏み込まない」。主定理への帰結は
+第\ref{sec:reading}節で述べる。
+
+\section{型推論の健全性: 規則}
+
+\subsection{宣言的体系}
+
+\begin{mathpar}
+  \inferrule*[right=T-Var]
+    {\Gamma(x) = \sigma \\ \sigma \inst \tau}
+    {\Gamma \vdash x : \tau}
+  \and
+  \inferrule*[right=T-Int]
+    { }
+    {\Gamma \vdash n : \tint}
+  \and
+  \inferrule*[right=T-Lam]
+    {\Gamma, x{:}\tau_1 \vdash e : \tau_2}
+    {\Gamma \vdash \lambda x.\,e : \tau_1 \to \tau_2}
+  \and
+  \inferrule*[right=T-App]
+    {\Gamma \vdash e_1 : \tau_1 \to \tau_2 \\ \Gamma \vdash e_2 : \tau_1}
+    {\Gamma \vdash e_1\,e_2 : \tau_2}
+  \and
+  \inferrule*[right=T-Let]
+    {\Gamma \vdash e_1 : \tau_1 \\
+     \gen(\Gamma,\tau_1) \ni \sigma \\
+     \Gamma, x{:}\sigma \vdash e_2 : \tau_2}
+    {\Gamma \vdash \mathtt{let}\;x = e_1\;\mathtt{in}\;e_2 : \tau_2}
+\end{mathpar}
+
+\subsection{アルゴリズム的体系}
+
+\begin{mathpar}
+  \inferrule*[right=I-Var]
+    {\Gamma(x) = \sigma \\ \sigma \inst \tau}
+    {\Gamma \vdash_{\!I} x : \tau}
+  \and
+  \inferrule*[right=I-Int]
+    { }
+    {\Gamma \vdash_{\!I} n : \tint}
+  \and
+  \inferrule*[right=I-Lam]
+    {\Gamma, x{:}\tau_1 \vdash_{\!I} e : \tau_2}
+    {\Gamma \vdash_{\!I} \lambda x.\,e : \tau_1 \to \tau_2}
+  \and
+  \inferrule*[right=I-App]
+    {\Gamma \vdash_{\!I} e_1 : \tau_1 \to \tau_2 \\
+     \Gamma \vdash_{\!I} e_2 : \tau_1}
+    {\Gamma \vdash_{\!I} e_1\,e_2 : \tau_2}
+  \and
+  \inferrule*[right=I-Let]
+    {\Gamma \vdash_{\!I} e_1 : \tau_1 \\
+     \gen(\Gamma,\tau_1) \ni \sigma \\
+     \Gamma, x{:}\sigma \vdash_{\!I} e_2 : \tau_2}
+    {\Gamma \vdash_{\!I} \mathtt{let}\;x = e_1\;\mathtt{in}\;e_2 : \tau_2}
+\end{mathpar}
+
+\textsc{I-App} は単一化が成功した後の状況を写している。関数が既に矢印型を持ち、
+その定義域が引数と合っていることが分かっている、という形である。\textsc{I-Lam} も
+同様に $\tau_1$ を解くのではなく推測する。単一化アルゴリズムはこの形式化に登場しない。
+
+\section{型推論の健全性: 証明の進み方}
+
+\begin{theorem}[\texttt{hm\_infer\_sound}]
+  $\Gamma \vdash_{\!I} e : \tau$ ならば $\Gamma \vdash e : \tau$ である。
+\end{theorem}
+
+\begin{proof}
+\texttt{intros G e T H} で三つの引数と導出 $H$ を導入し、\texttt{induction H} で
+$\Gamma \vdash_{\!I} e : \tau$ の導出に関する帰納法に入る。構成子ごとに五つの場合が
+生じる。以下、各場合の文脈と目標を追う。
+
+\medskip
+\emph{第 1 場合 \textsc{I-Var}。} 文脈には
+$H_1 : \Gamma(x) = \sigma$ と $H_2 : \sigma \inst \tau$ があり、目標は
+$\Gamma \vdash x : \tau$ である。\textsc{T-Var} を \texttt{eapply} すると、
+その二つの前提 $\Gamma(x) = ?\sigma$ と $?\sigma \inst \tau$ が残る。
+$?\sigma := \sigma$ と定まり、\texttt{eauto} が $H_1, H_2$ をそのまま当てる。
+タクティクは \texttt{eapply TyVar; eauto} の一行。
+
+\medskip
+\emph{第 2 場合 \textsc{I-Int}。} 目標は $\Gamma \vdash n : \tint$。
+前提を持たない \textsc{T-Int} がそのまま結論なので \texttt{constructor} で閉じる。
+
+\medskip
+\emph{第 3 場合 \textsc{I-Lam}。} 文脈には帰納法の仮定
+$\mathit{IH} : \Gamma, x{:}\tau_1 \vdash e : \tau_2$ があり、目標は
+$\Gamma \vdash \lambda x.\,e : \tau_1 \to \tau_2$。\textsc{T-Lam} を
+\texttt{apply} すると目標が $\Gamma, x{:}\tau_1 \vdash e : \tau_2$ に変わり、
+これは $\mathit{IH}$ そのものである。\texttt{apply TyLam. exact IHhm\_infer}。
+
+\medskip
+\emph{第 4 場合 \textsc{I-App}。} 帰納法の仮定が二つ、
+$\mathit{IH}_1 : \Gamma \vdash e_1 : \tau_1 \to \tau_2$ と
+$\mathit{IH}_2 : \Gamma \vdash e_2 : \tau_1$。目標は
+$\Gamma \vdash e_1\,e_2 : \tau_2$。\textsc{T-App} を \texttt{eapply} すると
+中間の型 $?\tau_1$ が未確定のまま二つの前提が残るが、$\mathit{IH}_1$ を当てた時点で
+$?\tau_1 := \tau_1$ が決まり、$\mathit{IH}_2$ が二つ目を満たす。
+\texttt{eapply TyApp; eauto}。
+
+\medskip
+\emph{第 5 場合 \textsc{I-Let}。} 文脈には
+$\mathit{IH}_1 : \Gamma \vdash e_1 : \tau_1$、
+$H_g : \gen(\Gamma,\tau_1) \ni \sigma$、
+$\mathit{IH}_2 : \Gamma, x{:}\sigma \vdash e_2 : \tau_2$ がある。
+\textsc{T-Let} の三つの前提はこの三つと文字どおり同じ形なので、
+\texttt{eapply TyLet; eauto} が順に当てて閉じる。ここで注目すべきは、
+$\gen$ の前提が\emph{そのまま持ち越されている}ことである。
+\textsc{I-Let} と \textsc{T-Let} が同じ前提を要求するので、
+アルゴリズム側で満たされたものが宣言側でもそのまま使える。
+
+\medskip
+以上で五つの場合がすべて閉じる。証明全体を並べると次のようになり、
+各場合が同名の規則へ一対一に対応していることが見て取れる。
+
+
+
+\begin{lstlisting}
+Proof.
+  intros G e T H. induction H.
+  - eapply TyVar; eauto.
+  - constructor.
+  - apply TyLam. exact IHhm_infer.
+  - eapply TyApp; eauto.
+  - eapply TyLet; eauto.
+Qed.
+\end{lstlisting}
+\end{proof}
+
+\subsection{検証した実例}
+
+二つのプログラムをアルゴリズム的体系で導き、定理で宣言的体系へ移している。
+\[
+  \mathtt{let}\;\mathit{id} = \lambda x.\,x\;\mathtt{in}\;\mathit{id}\;42
+  \;:\; \tint
+\]
+導出は束縛を $\forall[\alpha_0].\,(\tint \to \tint)$ に一般化し、
+$\tint \to \tint$ で使う。これは scheme の本体であり、注意~\ref{rem:inst} により
+唯一の具体化である。二つ目の例は環境に $+ : \tint \to \tint \to \tint$ を仮定して
+次を導く。
+\[
+  \lambda x.\,(+\;x)\;1 \;:\; \tint \to \tint .
+\]
+
+% =====================================================================
+\section{型安全性: 文法}
+\label{sec:safe-syntax}
+
+\subsection{文法}
+
+\[
+\begin{array}{lcll}
+  t & ::= & x \mid n \mid t_1 + t_2 \mid \lambda x{:}\tau.\,t \mid t_1\,t_2
+            \mid \mathtt{let}\;x = t_1\;\mathtt{in}\;t_2
+    & \text{項}\\[2pt]
+  v & ::= & n \mid \lambda x{:}\tau.\,t
+    & \text{値}\\[2pt]
+  \tau & ::= & \tint \mid \tau_1 \to \tau_2
+    & \text{型}
+\end{array}
+\]
+
+\begin{lstlisting}
+Inductive ty : Type :=
+| TInt : ty
+| TArrow : ty -> ty -> ty.
+
+Inductive tm : Type :=
+| TVar : nat -> tm       | TIntLit : nat -> tm
+| TAdd : tm -> tm -> tm
+| TLam : nat -> ty -> tm -> tm
+| TApp : tm -> tm -> tm
+| TLet : nat -> tm -> tm -> tm.
+\end{lstlisting}
+
+第\ref{sec:sound-syntax}節との違いを二つ、明示しておく。二つのファイルは
+ひとつの形式化として読まれやすいからである。
+
+\begin{remark}[型の言語に変数が無い]
+\label{rem:notvars}
+$\tau ::= \tint \mid \tau_1 \to \tau_2$ である。\texttt{TVar} 構成子は無く、
+scheme も量化子も無い。環境は変数を scheme ではなく\emph{型}へ写す。
+\end{remark}
+
+\begin{remark}[ラムダは型注釈を持ち \texttt{let} は単相]
+\label{rem:mono}
+$\lambda x{:}\tau.\,t$ は引数の型を持ち、下の \textsc{S-Let} は $t_1$ に与えられた
+ただ一つの型で $x$ を束縛する。一般化の段階が無い。
+\end{remark}
+
+二つを合わせると、このファイルの言語は単純型付きラムダ計算に \texttt{let} と加算を
+足したものである、ということになる。
+
+\section{型安全性: 規則}
+
+\subsection{型付け}
+
+\begin{mathpar}
+  \inferrule*[right=S-Var]
+    {\Gamma(x) = \tau}
+    {\Gamma \vdash x : \tau}
+  \and
+  \inferrule*[right=S-Int]
+    { }
+    {\Gamma \vdash n : \tint}
+  \and
+  \inferrule*[right=S-Add]
+    {\Gamma \vdash t_1 : \tint \\ \Gamma \vdash t_2 : \tint}
+    {\Gamma \vdash t_1 + t_2 : \tint}
+  \and
+  \inferrule*[right=S-Lam]
+    {\Gamma, x{:}\tau_1 \vdash t : \tau_2}
+    {\Gamma \vdash \lambda x{:}\tau_1.\,t : \tau_1 \to \tau_2}
+  \and
+  \inferrule*[right=S-App]
+    {\Gamma \vdash t_1 : \tau_1 \to \tau_2 \\ \Gamma \vdash t_2 : \tau_1}
+    {\Gamma \vdash t_1\,t_2 : \tau_2}
+  \and
+  \inferrule*[right=S-Let]
+    {\Gamma \vdash t_1 : \tau_1 \\ \Gamma, x{:}\tau_1 \vdash t_2 : \tau_2}
+    {\Gamma \vdash \mathtt{let}\;x = t_1\;\mathtt{in}\;t_2 : \tau_2}
+\end{mathpar}
+
+\subsection{代入}
+
+$\subst{t}{x}{s}$ は $x$ の自由な出現を $s$ で置き換える。$x$ を束縛する場所で止まる。
+
+\[
+\begin{array}{lcl}
+  \subst{y}{x}{s} &=& \text{$s$ if $y = x$, else $y$} \\
+  \subst{n}{x}{s} &=& n \\
+  \subst{(t_1 + t_2)}{x}{s} &=& \subst{t_1}{x}{s} + \subst{t_2}{x}{s} \\
+  \subst{(\lambda y{:}\tau.\,t)}{x}{s} &=&
+     \text{$\lambda y{:}\tau.\,t$ if $y = x$, else
+           $\lambda y{:}\tau.\,\subst{t}{x}{s}$} \\
+  \subst{(t_1\,t_2)}{x}{s} &=& \subst{t_1}{x}{s}\;\subst{t_2}{x}{s} \\
+  \subst{(\mathtt{let}\;y = t_1\;\mathtt{in}\;t_2)}{x}{s} &=&
+     \mathtt{let}\;y = \subst{t_1}{x}{s}\;\mathtt{in}\;
+     (\text{$t_2$ if $y = x$, else $\subst{t_2}{x}{s}$})
+\end{array}
+\]
+
+\subsection{操作意味論}
+
+値呼び、左から右。
+
+\begin{mathpar}
+  \inferrule*[right=E-Add]
+    { }
+    {n + m \step n{+}m}
+  \and
+  \inferrule*[right=E-Add1]
+    {t_1 \step t_1'}
+    {t_1 + t_2 \step t_1' + t_2}
+  \and
+  \inferrule*[right=E-Add2]
+    {t \step t'}
+    {v + t \step v + t'}
+  \and
+  \inferrule*[right=E-Beta]
+    { }
+    {(\lambda x{:}\tau.\,t)\,v \step \subst{t}{x}{v}}
+  \and
+  \inferrule*[right=E-App1]
+    {t_1 \step t_1'}
+    {t_1\,t_2 \step t_1'\,t_2}
+  \and
+  \inferrule*[right=E-App2]
+    {t \step t'}
+    {v\,t \step v\,t'}
+  \and
+  \inferrule*[right=E-Let]
+    { }
+    {\mathtt{let}\;x = v\;\mathtt{in}\;t \step \subst{t}{x}{v}}
+  \and
+  \inferrule*[right=E-Let1]
+    {t_1 \step t_1'}
+    {\mathtt{let}\;x = t_1\;\mathtt{in}\;t_2 \step
+     \mathtt{let}\;x = t_1'\;\mathtt{in}\;t_2}
+\end{mathpar}
+
+\section{型安全性: 証明の進み方}
+
+\subsection{環境についての補題}
+
+\texttt{extend} についての四つの事実を先に用意する。いずれも \texttt{extend} を
+\texttt{unfold} して $\mathtt{Nat.eqb}$ で場合分けするだけで終わる。
+
+\[
+\begin{array}{ll}
+  \texttt{extend\_eq} & (\Gamma, x{:}\tau)(x) = \tau \\
+  \texttt{extend\_neq} & x \neq y \Rightarrow (\Gamma, x{:}\tau)(y) = \Gamma(y) \\
+  \texttt{extend\_shadow} & \Gamma, x{:}\tau_1, x{:}\tau_2 = \Gamma, x{:}\tau_2 \\
+  \texttt{extend\_permute} & x \neq y \Rightarrow
+     \Gamma, x{:}\tau_x, y{:}\tau_y = \Gamma, y{:}\tau_y, x{:}\tau_x
+\end{array}
+\]
+
+証明はそれぞれ次のとおり。\texttt{extend\_eq} は $\mathtt{Nat.eqb}\;x\;x$ が
+\texttt{Nat.eqb\_refl} により \texttt{true} なので \texttt{Some}$\,\tau$ に簡約される。
+\texttt{extend\_neq} は $\mathtt{Nat.eqb}\;x\;y$ で場合分けし、\texttt{true} の枝は
+\texttt{Nat.eqb\_eq} から $x = y$ が出て仮定 $x \neq y$ と矛盾、\texttt{false} の枝は
+そのまま $\Gamma(y)$ に簡約される。\texttt{extend\_shadow} は
+$\mathtt{Nat.eqb}\;x\;y$ の両枝とも左右が同一項になる。\texttt{extend\_permute} は
+$\mathtt{Nat.eqb}\;y\;z$ と $\mathtt{Nat.eqb}\;x\;z$ の四通りを見て、三通りは
+\texttt{auto} で閉じ、両方 \texttt{true} の場合だけ \texttt{Nat.eqb\_eq} を二度使って
+$x = z = y$ を得、仮定 $x \neq y$ と矛盾させる。
+
+\medskip
+その上に二つの補題が乗る。
+
+\begin{lemma}[\texttt{context\_invariance}]
+  すべての $x$ について $\Gamma(x) = \Gamma'(x)$ であり、かつ
+  $\Gamma \vdash t : \tau$ ならば、$\Gamma' \vdash t : \tau$ である。
+\end{lemma}
+
+\begin{proof}
+$\Gamma'$ を \texttt{generalize dependent} してから型付け導出に関する帰納法。
+六つの場合のうち四つは機械的である。\textsc{S-Var} では
+$\Gamma(x) = \tau$ を $\Gamma'(x) = \tau$ に書き換えるのに仮定を逆向きに使う
+（\texttt{now rewrite <- Heq}）。\textsc{S-Int} は \texttt{constructor}、
+\textsc{S-Add} と \textsc{S-App} は帰納法の仮定を \texttt{auto} / \texttt{eauto} で
+当てる。
+
+働きがあるのは束縛を導入する二つである。\textsc{S-Lam} では帰納法の仮定が
+$\Gamma, x{:}\tau_1$ と $\Gamma', x{:}\tau_1$ の一致を要求するので、任意の $y$ について
+$\mathtt{Nat.eqb}\;x\;y$ で場合分けする。\texttt{true} の枝は両辺とも
+$\mathtt{Some}\;\tau_1$、\texttt{false} の枝はもとの仮定に帰着する。
+\textsc{S-Let} も同様で、束縛される式の側は仮定 \texttt{Heq} をそのまま渡し、
+本体の側で同じ場合分けをする。
+\end{proof}
+
+\begin{lemma}[\texttt{weakening}]
+  $\Gamma \subseteq \Gamma'$（$\Gamma(x) = \tau$ ならば $\Gamma'(x) = \tau$）かつ
+  $\Gamma \vdash t : \tau$ ならば、$\Gamma' \vdash t : \tau$ である。
+\end{lemma}
+
+\begin{proof}
+構成は \texttt{context\_invariance} と同じで、等号が包含に変わる。\textsc{S-Var} では
+包含の仮定を \texttt{eauto} が直接当てる。\textsc{S-Lam} と \textsc{S-Let} では、
+$\Gamma \subseteq \Gamma'$ から $\Gamma, x{:}\tau_1 \subseteq \Gamma', x{:}\tau_1$ を
+示す必要があり、$\mathtt{Nat.eqb}\;x\;y$ の \texttt{true} の枝では両辺が同じ束縛、
+\texttt{false} の枝ではもとの包含に帰着する。
+\end{proof}
+
+\begin{lemma}[\texttt{weaken\_empty}]
+  $\emptyset \vdash t : \tau$ ならば、任意の $\Gamma$ について
+  $\Gamma \vdash t : \tau$ である。
+\end{lemma}
+
+\begin{proof}
+\texttt{weakening} の特別な場合。$\emptyset \subseteq \Gamma$ を示せばよいが、
+$\emptyset(x) = \mathtt{None}$ なので前提 $\emptyset(x) = \mathtt{Some}\;\tau$ が
+矛盾し、\texttt{discriminate} で終わる。
+\end{proof}
+
+\subsection{代入補題}
+
+\begin{lemma}[\texttt{substitution\_preserves\_typing}]
+  $\Gamma, x{:}\upsilon \vdash t : \tau$ かつ $\vdash v : \upsilon$ ならば
+  $\Gamma \vdash \subst{t}{x}{v} : \tau$ である。
+\end{lemma}
+
+\begin{proof}
+$\tau$ と $\Gamma$ を \texttt{generalize dependent} してから、\emph{項} $t$ に関する
+帰納法に入る。導出ではなく項に関する帰納法を取るのは、各場合が $v$ への仮定
+$\vdash v : \upsilon$ を使い直せるようにするためである。各場合ではまず
+\texttt{simpl} で \texttt{subst} を一段展開し、\texttt{inversion Ht} で型付け導出を
+分解する。六つの場合を順に見る。
+
+\medskip
+\emph{第 1 場合 $t = y$（変数）。} \texttt{inversion} から
+$H_1 : (\Gamma, x{:}\upsilon)(y) = \tau$ が出る。$\mathtt{Nat.eqb}\;x\;y$ で
+場合分けする。
+
+\texttt{true} の枝では \texttt{Nat.eqb\_eq} から $x = y$ を得て \texttt{subst}。
+$H_1$ に \texttt{extend\_eq} を書き換えると $\mathtt{Some}\;\upsilon =
+\mathtt{Some}\;\tau$ となり、\texttt{inversion} で $\upsilon = \tau$。
+一方 \texttt{subst} の定義から $\subst{y}{x}{v} = v$ なので、目標は
+$\Gamma \vdash v : \tau$ である。仮定 $\vdash v : \upsilon$ を
+\texttt{weaken\_empty} で $\Gamma$ へ持ち上げれば閉じる。
+
+\texttt{false} の枝では \texttt{Nat.eqb\_neq} から $x \neq y$。
+$\subst{y}{x}{v} = y$ なので目標は $\Gamma \vdash y : \tau$ であり、
+\textsc{S-Var} を適用すると $\Gamma(y) = \tau$ が残る。$H_1$ に
+\texttt{extend\_neq} を（副条件 $x \neq y$ 付きで）書き換えれば、それがちょうど
+$H_1$ になる。
+
+\medskip
+\emph{第 2 場合 $t = n$（整数リテラル）。} $\subst{n}{x}{v} = n$、目標は
+$\Gamma \vdash n : \tint$ で、\textsc{S-Int} が前提なしに与える。
+
+\medskip
+\emph{第 3 場合 $t = t_1 + t_2$。} \texttt{inversion} から両辺が $\tint$ である
+ことが出る。\textsc{S-Add} を適用して二つの目標に分け、それぞれ $t_1$、$t_2$ の
+帰納法の仮定を $v$ への仮定とともに当てる。
+
+\medskip
+\emph{第 4 場合 $t = \lambda y{:}\tau_1.\,t'$。} \texttt{inversion} から
+$H_b : (\Gamma, x{:}\upsilon), y{:}\tau_1 \vdash t' : \tau_2$ が出る。ここで
+$\mathtt{Nat.eqb}\;x\;y$ による場合分けが本質的になる。
+
+\texttt{true} の枝、すなわち $y = x$ のとき、\texttt{subst} の定義により代入は
+ラムダの内側へ入らない($\subst{(\lambda x{:}\tau_1.\,t')}{x}{v} =
+\lambda x{:}\tau_1.\,t'$)。よって目標は
+$\Gamma \vdash \lambda x{:}\tau_1.\,t' : \tau_1 \to \tau_2$ であり、
+\textsc{S-Lam} を適用すると $\Gamma, x{:}\tau_1 \vdash t' : \tau_2$ が残る。
+手元にあるのは $H_b$、すなわち $(\Gamma, x{:}\upsilon), x{:}\tau_1$ の下での型付けだが、
+\texttt{extend\_shadow} により
+\[
+  (\Gamma, x{:}\upsilon), x{:}\tau_1 \;=\; \Gamma, x{:}\tau_1
+\]
+が各点で成り立つので、\texttt{context\_invariance} で環境を移せる。内側の束縛が
+外側を隠す、という当たり前のことが、ここで補題として要る。
+
+\texttt{false} の枝、すなわち $y \neq x$ のとき、代入はラムダの内側へ入る。
+目標は $\Gamma \vdash \lambda y{:}\tau_1.\,\subst{t'}{x}{v} : \tau_1 \to \tau_2$ で、
+\textsc{S-Lam} の後に $t'$ の帰納法の仮定を使いたい。その仮定は環境が
+$(\Gamma, y{:}\tau_1), x{:}\upsilon$ の形であることを求めるが、$H_b$ は
+$(\Gamma, x{:}\upsilon), y{:}\tau_1$ である。\texttt{extend\_permute}（副条件
+$x \neq y$）が両者の一致を与えるので、\texttt{context\_invariance} で入れ替えてから
+帰納法の仮定を当てる。
+
+\medskip
+\emph{第 5 場合 $t = t_1\,t_2$。} 第 3 場合と同じ運びで、\textsc{S-App} を
+\texttt{eapply} して二つの帰納法の仮定を当てる。
+
+\medskip
+\emph{第 6 場合 $t = \mathtt{let}\;y = t_1\;\mathtt{in}\;t_2$。} 束縛される式 $t_1$ は
+無条件に代入を受けるので、帰納法の仮定をそのまま使う。本体 $t_2$ は第 4 場合と
+同じ二分岐になる。$y = x$ なら代入は本体に入らず、\texttt{extend\_shadow} と
+\texttt{context\_invariance} で閉じる。$y \neq x$ なら \texttt{extend\_permute} で
+束縛を入れ替えてから $t_2$ の帰納法の仮定を当てる。
+
+\medskip
+これで六つの場合がすべて閉じる。全体を通して働いているのは、\emph{束縛が名前を
+隠すか、順序を入れ替えられるか}という二つの事実だけであり、それが
+\texttt{extend\_shadow} と \texttt{extend\_permute} に切り出されている。
+\end{proof}
+
+\subsection{標準形の補題}
+
+どちらも $\mathrm{value}(v)$ を \texttt{inversion} して $v$ が整数リテラルか
+ラムダかに分け、合わない方を型付け導出の \texttt{inversion} で潰す。
+\[
+  \mathrm{value}(v),\; \vdash v : \tint
+    \;\Longrightarrow\; v = n
+  \qquad
+  \mathrm{value}(v),\; \vdash v : \tau_1 \to \tau_2
+    \;\Longrightarrow\; v = \lambda x{:}\tau_1.\,t
+\]
+たとえば \texttt{canonical\_int} で $v = \lambda x{:}\tau.\,t$ の場合、
+$\vdash \lambda x{:}\tau.\,t : \tint$ を \texttt{inversion} すると \textsc{S-Lam} しか
+当てはまらず、その結論は $\tau \to \tau'$ の形であって $\tint$ とは構成子が違うので、
+その場合自体が消える。\texttt{canonical\_arrow} で $v = n$ の場合も同様に、
+\textsc{S-Int} が与える $\tint$ が $\tau_1 \to \tau_2$ と食い違って潰れる。
+残った場合が求める形を与える。
+
+\subsection{Progress}
+
+\begin{theorem}[\texttt{progress}]
+  $\vdash t : \tau$ ならば、$t$ は値であるか、ある $t'$ へ $t \step t'$ と進む。
+\end{theorem}
+
+\begin{proof}
+\texttt{remember empty as G} で環境を $\emptyset$ に固定してから型付け導出に関する
+帰納法に入る。この \texttt{remember} が要るのは、\textsc{S-Lam} や \textsc{S-Let} の
+部分導出が拡張された環境の下にあり、帰納法の仮定をそのまま使えないためである。
+六つの場合を順に見る。
+
+\medskip
+\emph{\textsc{S-Var}。} 前提は $\emptyset(x) = \tau$ だが、$\emptyset$ は定義から
+すべての $x$ に $\mathtt{None}$ を返す。$\mathtt{None} = \mathtt{Some}\;\tau$ は
+構成子が違うので \texttt{discriminate} で場合ごと消える。閉じた項に自由変数は無い、
+ということがここで効いている。
+
+\medskip
+\emph{\textsc{S-Int}。} $n$ は \textsc{V-Int} により値。左の選択肢を取る。
+
+\medskip
+\emph{\textsc{S-Lam}。} $\lambda x{:}\tau_1.\,t$ は \textsc{V-Lam} により値。同じく左。
+
+\medskip
+\emph{\textsc{S-Add}。} 右の選択肢を主張する。帰納法の仮定 $\mathit{IH}_1$ を
+$t_1$ に適用して場合分けする。
+
+$t_1$ が進むなら、$t_1 \step t_1'$ を得て $t_1 + t_2 \step t_1' + t_2$ が
+\textsc{E-Add1} で従う。
+
+$t_1$ が値なら、$\mathit{IH}_2$ を $t_2$ に適用する。$t_2$ が進むなら
+\textsc{E-Add2} が使える（$t_1$ が値であることが \textsc{E-Add2} の前提として要る）。
+$t_2$ も値なら、両辺に \texttt{canonical\_int} を適用して
+$t_1 = n$、$t_2 = m$ を得る。書き換えたうえで \textsc{E-Add} が
+$n + m \step n{+}m$ を与える。証人は $\mathtt{TIntLit}\,(n+m)$ である。
+
+\medskip
+\emph{\textsc{S-App}。} 同じ運びだが、値の場合の扱いが違う。$t_1$ が進むなら
+\textsc{E-App1}、$t_1$ が値で $t_2$ が進むなら \textsc{E-App2}。両方値のときは
+$t_1$ が矢印型 $\tau_1 \to \tau_2$ を持つので \texttt{canonical\_arrow} を適用して
+$t_1 = \lambda x{:}\tau_1.\,t$ の形を取り出す。これで \textsc{E-Beta} が使え、
+証人は $\subst{t}{x}{t_2}$ である。ここが標準形の補題を要する箇所であり、
+「型が付いているのに関数の位置に関数でないものが来る」という詰まり方が
+起こり得ないことを保証している。
+
+\medskip
+\emph{\textsc{S-Let}。} $\mathit{IH}_1$ を $t_1$ に適用する。$t_1$ が値なら
+\textsc{E-Let} が発火し、証人は $\subst{t_2}{x}{t_1}$。値でなければ
+$t_1 \step t_1'$ から \textsc{E-Let1} が
+$\mathtt{let}\;x = t_1\;\mathtt{in}\;t_2 \step
+ \mathtt{let}\;x = t_1'\;\mathtt{in}\;t_2$ を与える。
+
+\medskip
+どの場合でも「値である」か「一歩進む証人を作る」かのいずれかが得られた。
+\end{proof}
+
+\subsection{Preservation}
+
+\begin{theorem}[\texttt{preservation}]
+  $\vdash t : \tau$ かつ $t \step t'$ ならば $\vdash t' : \tau$ である。
+\end{theorem}
+
+\begin{proof}
+$\tau$ を \texttt{generalize dependent} してから step の導出に関する帰納法に入り、
+各場合でまず型付け導出を \texttt{inversion} する。step の構成子は八つある。
+
+\medskip
+\emph{\textsc{E-Add}（$n + m \step n{+}m$）。} 型付けの \texttt{inversion} から
+$\tau = \tint$。目標は $\vdash n{+}m : \tint$ で、\textsc{S-Int} が与える。
+足し算の結果がまた整数である、というだけのことだが、これが preservation の
+基底の場合にあたる。
+
+\medskip
+\emph{\textsc{E-Add1}（$t_1 \step t_1'$ から $t_1 + t_2 \step t_1' + t_2$）。}
+\texttt{inversion} から $\vdash t_1 : \tint$ と $\vdash t_2 : \tint$。
+\textsc{S-Add} を組み直す。左の前提は帰納法の仮定を $\vdash t_1 : \tint$ に
+当てて $\vdash t_1' : \tint$ とし、右はそのまま。
+
+\medskip
+\emph{\textsc{E-Add2}。} 対称で、右側に帰納法の仮定を当てる。
+
+\medskip
+\emph{\textsc{E-Beta}（$(\lambda x{:}\tau_1.\,t)\,v \step \subst{t}{x}{v}$）。}
+ここが要である。まず \textsc{S-App} の \texttt{inversion} で
+$\vdash \lambda x{:}\tau_1.\,t : \tau_1 \to \tau$ と $\vdash v : \tau_1$ を得る。
+続いて前者を \textsc{S-Lam} で \texttt{inversion} すると
+\[
+  \emptyset, x{:}\tau_1 \vdash t : \tau
+\]
+が出る。これと $\vdash v : \tau_1$ が、そのまま代入補題の二つの仮定である
+（$\Gamma := \emptyset$、$\upsilon := \tau_1$）。補題を適用すれば
+$\vdash \subst{t}{x}{v} : \tau$ が得られる。二段階の \texttt{inversion} で
+ラムダの本体の型付けを取り出すところが、この場合の中身のすべてである。
+
+\medskip
+\emph{\textsc{E-App1}、\textsc{E-App2}。} \textsc{S-App} を組み直し、
+進む側に帰納法の仮定を当てる。中間の型は \texttt{eapply} が
+メタ変数として扱い、他方の前提を当てた時点で確定する。
+
+\medskip
+\emph{\textsc{E-Let}（$\mathtt{let}\;x = v\;\mathtt{in}\;t \step
+\subst{t}{x}{v}$）。} \textsc{S-Let} の \texttt{inversion} から
+$\vdash v : \tau_1$ と $\emptyset, x{:}\tau_1 \vdash t : \tau$ が同時に出る。
+\textsc{E-Beta} と違い \texttt{inversion} は一段で済む。あとは代入補題を
+適用するだけである。
+
+\medskip
+\emph{\textsc{E-Let1}。} \textsc{S-Let} を組み直す。束縛される式の前提には
+帰納法の仮定を当て、本体の前提はそのまま持ち越す。本体の型付けは環境
+$\emptyset, x{:}\tau_1$ の下にあるが、$\tau_1$ は変わらないのでそのまま使える。
+
+\medskip
+八つの場合がすべて閉じる。合同規則の六つは規則を組み直すだけで、実質的な内容は
+\textsc{E-Beta} と \textsc{E-Let} の二つ、いずれも代入補題への帰着である。
+\end{proof}
+
+\texttt{type\_safety} は系として述べられており、定義上 \texttt{preservation} そのもの
+である。
+
+\subsection{検証した実例}
+
+\[
+  \mathtt{let}\;f = \lambda x{:}\tint.\,x + 1\;\mathtt{in}\;f\;41
+\]
+が型 $\tint$ を持つことを証明し、\textsc{E-Let} で一歩進め、
+\texttt{preservation} で型を付け直している。
+
+% =====================================================================
+\section{この結果をどう読むか}
+\label{sec:reading}
+
+どちらのファイルもコンパイルが通り、述べられた結果はすべて \texttt{Qed} で閉じている。
+しかし主張の範囲は名前が示唆するより狭い。本節はそれがどの程度かを述べる。
+
+\subsection{健全性の定理は言い換えである}
+
+二つの体系を規則ごとに見比べる。\textsc{I-Var} と \textsc{T-Var} は同じ二つの前提を
+持ち、\textsc{I-Int} と \textsc{T-Int} は前提を持たない。\textsc{I-Lam}、
+\textsc{I-App}、\textsc{I-Let} も \textsc{T-Lam}、\textsc{T-App}、\textsc{T-Let} と
+前提ごとに一致する。したがって二つの関係は\emph{同一の関係}を二度書いたものであり、
+\texttt{hm\_infer\_sound} は各構成子を相方へ写すことで証明される。
+
+これは証明の欠陥ではない。証明は正しい。しかし定理が型推論について何の情報も
+運んでいないことを意味する。とくに次のとおりである。
+
+\begin{itemize}
+  \item 単一化アルゴリズムが定義されていないので、それについて何も証明されていない。
+  \item 具体化が恒等写像なので（注意~\ref{rem:inst}）、scheme を複数の型で使うことに
+  ついて定理は何も述べない。
+  \item 一般化に制約が無いので（注意~\ref{rem:gen}）、Damas--Milner の側条件は
+  仮定もされず確立もされていない。
+\end{itemize}
+
+主張に中身を持たせるには、\textsc{Inst} に量化変数を置換させ、\textsc{Gen} に条件
+$\bar\alpha \cap \ftv(\Gamma) = \emptyset$ を課し（そのためには $\ftv(\Gamma)$ を
+計算できるよう環境を連想リストにする必要がある）、アルゴリズム的体系には scheme を
+選ばせるのではなく計算させればよい。そうすれば二つの体系は異なるものになり、健全性は
+アルゴリズムが計算したものが宣言的体系の要求を満たすことを証明せねばならなくなる。
+
+\subsection{型安全性の定理は単純型付き言語についてのものである}
+
+注意~\ref{rem:notvars} と注意~\ref{rem:mono} により、\texttt{HMTypeSafety.v} には
+型変数も scheme も多相 \texttt{let} も無い。progress と preservation は証明されており、
+しかも真面目に証明されている。代入補題、文脈不変性、weakening、標準形の補題がすべて
+揃っている。だがそれは単純型付きラムダ計算に \texttt{let} と加算を足したものについて
+である。Hindley--Milner 的なものは何一つ現れない。
+
+二つのファイルは繋がってもいない。第\ref{sec:safe-syntax}節の型の言語は
+第\ref{sec:sound-syntax}節のそれではないので、\texttt{hm\_infer\_sound} が型を付けた
+プログラムが、そのことによって \texttt{progress} の対象になるわけではない。
+
+\subsection{覆っていない範囲}
+
+\begin{itemize}
+  \item 具体的な単一化アルゴリズムとその正しさ。
+  \item occurs check。
+  \item principal type 定理。
+  \item 安全性が証明された側の言語における多相性。
+  \item 再帰。どちらのファイルにも \texttt{let rec} が無いので、再帰的定義について
+  本証明は何も述べていない。
+  \item リスト、組、パターン照合、参照、例外。
+  \item このリポジトリの OCaml 側の prover（\texttt{w.ml}、
+  \texttt{typing\_thm.ml}、\texttt{prove.ml} ほか）との対応。Coq の形式化と OCaml の
+  コードは別々に書かれており、両者を結ぶ定理は無い。
+\end{itemize}
+
+\section{検証方法}
+
+\begin{lstlisting}
+coqc HMSoundness.v
+coqc HMTypeSafety.v
+\end{lstlisting}
+
+どちらも通る。\texttt{Admitted} も \texttt{admit} も \texttt{Axiom} も含まないので、
+述べられた結果はすべて上の定義から完全に証明されている。まさにそれゆえに
+第\ref{sec:reading}節が重要になる。証明は、それが定義する体系については健全である。
+そしてその体系は、名前が示すものより小さい。
+
+本稿は次で組んだ。
+
+\begin{lstlisting}
+lualatex -interaction=nonstopmode hm_safety_report_ja.tex   # 2 回
+\end{lstlisting}
+
+\end{document}
